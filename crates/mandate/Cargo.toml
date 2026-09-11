@@ -1,0 +1,20 @@
+[package]
+name = "mandate"
+version = "0.1.0"
+edition = "2024"
+description = "Recursive ENSv2 spending-mandate resolution and the ancestor-chain spend guard."
+
+[dependencies]
+meter = { workspace = true }
+
+alloy = { workspace = true }
+
+anyhow = { workspace = true }
+serde = { workspace = true }
+thiserror = "2"
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

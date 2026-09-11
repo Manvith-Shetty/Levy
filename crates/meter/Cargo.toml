@@ -1,0 +1,9 @@
+[package]
+name = "meter"
+version = "0.1.0"
+edition = "2024"
+description = "Shared metering, pricing, and wire types for the x402 Hedera inference marketplace."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

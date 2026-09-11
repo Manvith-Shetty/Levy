@@ -1,0 +1,45 @@
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2024"
+description = "x402-gated, mandate-checked, per-token metered inference gateway on Hedera."
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[[bin]]
+name = "create-topic"
+path = "src/bin/create_topic.rs"
+
+[[bin]]
+name = "allowance-drip"
+path = "src/bin/allowance_drip.rs"
+
+[dependencies]
+meter = { workspace = true }
+mandate = { workspace = true }
+
+r402-protocol = { workspace = true }
+r402-server = { workspace = true }
+r402-facilitator = { workspace = true }
+r402-http = { workspace = true }
+r402-hedera = { workspace = true }
+
+hedera = { workspace = true }
+
+anyhow = { workspace = true }
+axum = { workspace = true }
+dotenvy = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
