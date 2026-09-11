@@ -1,16 +1,24 @@
-//! Reads a subname's live mandate policy straight from an ENSv2
-//! `PermissionedRegistry` deployment on Sepolia.
+//! Reads a subname's live mandate policy from a real ENSv2 hierarchy on Sepolia.
 //!
-//! Two calls per node: the registry's `resolver(bytes32)` to find the
-//! `PermissionedResolver`, then that resolver's ENSIP-5 `text(bytes32,string)`
-//! for each policy field. Both are part of the stable, standard interface the
-//! Model doc commits to regardless of the registrar's own custom logic.
+//! The tree lives across one [`PermissionedRegistry`](https://docs.ens.domains/ensv2/permissioned-registry)
+//! per level (e.g. `root` in L1, `agent` in L2, `sub` in L3), linked by
+//! `setSubregistry` pointers. This reader walks DOWN from the configured
+//! top-level registry following those pointers, so a name only resolves when
+//! the on-chain hierarchy actually contains it — no string-splitting
+//! shortcuts, no hardcoded level addresses.
 //!
-//! `expiryOf` is a placeholder for the `PermissionedRegistry`'s native
-//! absolute-expiry read — point it at the real function name once that
-//! contract is deployed; everything else in this module is unaffected.
+//! Per level, two reads: `getExpiry(labelhash)` first, then `getResolver(label)`
+//! for the `PermissionedResolver` holding that name's records. Policy comes
+//! from ENSIP-5 `text(node, key)` records for `budget`, `allowedServices`,
+//! `ratePerMinute`, `maxPerCall`, keyed by the full name's namehash.
+//!
+//! Dead ancestors are attributed precisely: a missing pointer or resolver on
+//! a never-registered name is `NotFound`; an expired entry surfaces as
+//! `AncestorExpired` carrying the dead ancestor's full name, so
+//! [`MandateGuard`](crate::MandateGuard) blames `root` — not the leaf that
+//! merely walks through it.
 
-use alloy::primitives::{Address, B256, keccak256};
+use alloy::primitives::{Address, B256, U256, keccak256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::sol;
 use alloy::transports::http::reqwest::Url;
@@ -20,9 +28,10 @@ use crate::resolver::{MandateError, MandateNode, MandateResolver};
 
 sol! {
     #[sol(rpc)]
-    interface IEnsRegistry {
-        function resolver(bytes32 node) external view returns (address);
-        function expiryOf(bytes32 node) external view returns (uint64);
+    interface IRegistry {
+        function getSubregistry(string calldata label) external view returns (address);
+        function getResolver(string calldata label) external view returns (address);
+        function getExpiry(uint256 anyId) external view returns (uint64);
     }
 
     #[sol(rpc)]
@@ -31,18 +40,24 @@ sol! {
     }
 }
 
-/// Resolves mandate policy from a live ENSv2 registry over any [`Provider`].
+/// Resolves mandate policy from a live ENSv2 hierarchy over any [`Provider`].
 #[derive(Clone)]
 pub struct EnsResolver<P> {
     provider: P,
-    registry: Address,
+    /// Registry holding the TOP of our namespace (level holding `root`).
+    /// Deeper levels are discovered by walking `getSubregistry` pointers,
+    /// so only this one address is ever configured.
+    top_registry: Address,
 }
 
 impl<P: Provider + Clone> EnsResolver<P> {
-    /// Builds a resolver against `registry` using an already-constructed
+    /// Builds a resolver against `top_registry` using an already-constructed
     /// provider.
-    pub const fn new(provider: P, registry: Address) -> Self {
-        Self { provider, registry }
+    pub const fn new(provider: P, top_registry: Address) -> Self {
+        Self {
+            provider,
+            top_registry,
+        }
     }
 }
 
@@ -53,9 +68,9 @@ impl<P: Provider + Clone> EnsResolver<P> {
 /// [`MandateGuard`](crate::MandateGuard) can be built against whether the
 /// gateway picks it at compile time or at runtime from configuration.
 #[must_use]
-pub fn http(rpc_url: Url, registry: Address) -> EnsResolver<DynProvider> {
+pub fn http(rpc_url: Url, top_registry: Address) -> EnsResolver<DynProvider> {
     let provider = ProviderBuilder::new().connect_http(rpc_url).erased();
-    EnsResolver::new(provider, registry)
+    EnsResolver::new(provider, top_registry)
 }
 
 /// Builds an [`EnsResolver`] straight from [`EnsEnv::from_env`](crate::EnsEnv::from_env)
@@ -80,6 +95,11 @@ fn namehash(name: &str) -> B256 {
     })
 }
 
+/// Labelhash as the `anyId` the registry's expiry views accept.
+fn labelhash(label: &str) -> U256 {
+    U256::from_be_bytes(keccak256(label.as_bytes()).0)
+}
+
 /// Strips the leftmost label to get the parent name, or `None` at the root.
 fn parent_of(name: &str) -> Option<String> {
     name.split_once('.').map(|(_, rest)| rest.to_owned())
@@ -94,28 +114,71 @@ fn backend(node: &str, error: impl Into<anyhow::Error>) -> MandateError {
 
 impl<P: Provider + Clone> MandateResolver for EnsResolver<P> {
     async fn resolve(&self, ens_name: &str) -> Result<MandateNode, MandateError> {
-        let node = namehash(ens_name);
-        let registry = IEnsRegistry::new(self.registry, self.provider.clone());
+        let labels: Vec<&str> = ens_name.split('.').collect();
+        if labels.iter().any(|l| l.is_empty()) {
+            return Err(MandateError::NotFound(ens_name.to_owned()));
+        }
 
-        let resolver_address = registry
-            .resolver(node)
+        // Walk down: top registry holds the last label; each getSubregistry
+        // pointer leads to the registry holding the next label down. A zero
+        // pointer means the ancestor at this level is gone: never-registered
+        // (expiry 0) is NotFound, an expired entry names its ancestor.
+        let mut registry_addr = self.top_registry;
+        for depth in (1..labels.len()).rev() {
+            let reg = IRegistry::new(registry_addr, self.provider.clone());
+            let next = reg
+                .getSubregistry(labels[depth].to_owned())
+                .call()
+                .await
+                .map_err(|e| backend(ens_name, e))?;
+            if next.is_zero() {
+                let ancestor = labels[depth..].join(".");
+                let expiry = reg
+                    .getExpiry(labelhash(labels[depth]))
+                    .call()
+                    .await
+                    .map_err(|e| backend(ens_name, e))?;
+                if expiry == 0 {
+                    return Err(MandateError::NotFound(ens_name.to_owned()));
+                }
+                return Err(MandateError::AncestorExpired(ancestor));
+            }
+            registry_addr = next;
+        }
+
+        let leaf = labels[0];
+        let reg = IRegistry::new(registry_addr, self.provider.clone());
+        // Expiry first: an expired leaf must report Expired even though its
+        // resolver reads back as zero (expired entries resolve to address(0)).
+        let leaf_expiry = reg
+            .getExpiry(labelhash(leaf))
+            .call()
+            .await
+            .map_err(|e| backend(ens_name, e))?;
+        if leaf_expiry == 0 {
+            return Err(MandateError::NotFound(ens_name.to_owned()));
+        }
+        let now = OffsetDateTime::now_utc();
+        let leaf_expires_at = OffsetDateTime::from_unix_timestamp(
+            i64::try_from(leaf_expiry).map_err(|e| backend(ens_name, e))?,
+        )
+        .map_err(|e| backend(ens_name, e))?;
+        if leaf_expires_at <= now {
+            return Err(MandateError::AncestorExpired(ens_name.to_owned()));
+        }
+
+        let resolver_address = reg
+            .getResolver(leaf.to_owned())
             .call()
             .await
             .map_err(|e| backend(ens_name, e))?;
         if resolver_address.is_zero() {
             return Err(MandateError::NotFound(ens_name.to_owned()));
         }
+        let expiry = leaf_expiry;
+        let expires_at = leaf_expires_at;
 
-        let expiry = registry
-            .expiryOf(node)
-            .call()
-            .await
-            .map_err(|e| backend(ens_name, e))?;
-        let expires_at = OffsetDateTime::from_unix_timestamp(
-            i64::try_from(expiry).map_err(|e| backend(ens_name, e))?,
-        )
-        .map_err(|e| backend(ens_name, e))?;
-
+        let node = namehash(ens_name);
         let resolver = IPermissionedResolver::new(resolver_address, self.provider.clone());
         let text = |key: &'static str| {
             let resolver = &resolver;
@@ -180,8 +243,13 @@ mod tests {
 
     #[test]
     fn parent_of_strips_one_label_at_a_time() {
-        assert_eq!(parent_of("leaf.mid.root.eth"), Some("mid.root.eth".to_owned()));
-        assert_eq!(parent_of("root.eth"), Some("eth".to_owned()));
-        assert_eq!(parent_of("eth"), None);
+        assert_eq!(parent_of("leaf.mid.root"), Some("mid.root".to_owned()));
+        assert_eq!(parent_of("root"), None);
+    }
+
+    #[test]
+    fn labelhash_matches_keccak_of_the_label() {
+        let expected = U256::from_be_bytes(keccak256("agent".as_bytes()).0);
+        assert_eq!(labelhash("agent"), expected);
     }
 }

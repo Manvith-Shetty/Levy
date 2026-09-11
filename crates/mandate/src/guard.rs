@@ -84,14 +84,21 @@ impl<R: MandateResolver> MandateGuard<R> {
         let mut chain: Vec<(String, MandateNode)> = Vec::new();
         let mut current = agent.to_owned();
         loop {
-            let node = self
-                .resolver
-                .resolve(&current)
-                .await
-                .map_err(|_| MandateViolation {
-                    node: current.clone(),
-                    reason: Violation::Unresolvable,
-                })?;
+            let node = match self.resolver.resolve(&current).await {
+                Ok(node) => node,
+                Err(crate::MandateError::AncestorExpired(dead)) => {
+                    return Err(MandateViolation {
+                        node: dead,
+                        reason: Violation::Expired,
+                    });
+                }
+                Err(_) => {
+                    return Err(MandateViolation {
+                        node: current.clone(),
+                        reason: Violation::Unresolvable,
+                    });
+                }
+            };
             let parent = node.parent.clone();
             chain.push((current, node));
             match parent {

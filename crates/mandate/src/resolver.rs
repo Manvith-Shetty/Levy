@@ -27,6 +27,12 @@ pub enum MandateError {
     /// ENSv2 returns expired names to `AVAILABLE`).
     #[error("mandate node {0:?} not found")]
     NotFound(String),
+    /// An ancestor of the queried name is registered but expired (or its
+    /// subregistry pointer is gone because of it). Carries the dead
+    /// ancestor's full name so the guard blames the right node instead of
+    /// the leaf that merely walks through it.
+    #[error("mandate ancestor {0:?} expired")]
+    AncestorExpired(String),
     /// The resolver backend itself failed (RPC error, bad ABI response, …).
     #[error("resolving mandate node {node:?}: {source}")]
     Backend {
