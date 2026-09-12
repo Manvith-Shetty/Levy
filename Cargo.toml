@@ -1,11 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/common", "crates/meter", "crates/gateway", "crates/mandate"]
+members = ["crates/common", "crates/meter", "crates/gateway", "crates/mandate", "crates/agent"]
 
 [workspace.dependencies]
 common = { path = "crates/common" }
 meter = { path = "crates/meter" }
 mandate = { path = "crates/mandate" }
+agent = { path = "crates/agent" }
 
 # x402 protocol, Hedera exact scheme, HTTP transport
 r402-protocol = "0.21"

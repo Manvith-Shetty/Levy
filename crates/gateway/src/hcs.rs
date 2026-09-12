@@ -20,6 +20,14 @@ use crate::quotes::QuoteStore;
 
 /// Parses a Hedera private key in any of the formats the portal and SDKs emit.
 ///
+/// DER-encoded keys are self-describing and always parse correctly. A raw,
+/// undecorated 32-byte hex string is not — it's valid input for both curves,
+/// and `PrivateKey::from_str`/`from_bytes` silently assumes Ed25519 for it,
+/// which misparses the ECDSA keys the Hedera portal now hands out by
+/// default. Trying `from_str_ecdsa` before `from_str_ed25519` (and before
+/// the ambiguous generic `from_str`) makes that common case correct; a
+/// genuinely Ed25519 raw hex key still parses fine via the later fallback.
+///
 /// # Errors
 ///
 /// Returns an error when the string is not a recognisable key.
@@ -27,10 +35,10 @@ pub fn parse_private_key(raw: &str) -> Result<PrivateKey> {
     let trimmed = raw.trim();
     let s = trimmed.strip_prefix("0x").unwrap_or(trimmed);
     [
-        PrivateKey::from_str(s).ok(),
         PrivateKey::from_str_der(s).ok(),
         PrivateKey::from_str_ecdsa(s).ok(),
         PrivateKey::from_str_ed25519(s).ok(),
+        PrivateKey::from_str(s).ok(),
     ]
     .into_iter()
     .flatten()

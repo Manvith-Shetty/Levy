@@ -37,7 +37,7 @@ async fn run() -> Result<()> {
     let operator_id =
         AccountId::from_str(&operator.operator_id).context("invalid HEDERA_OPERATOR_ID")?;
     let agent = AccountId::from_str(&drip.agent_account_id)
-        .context("invalid DRIP_AGENT_ACCOUNT_ID")?;
+        .context("invalid AGENT_ACCOUNT_ID")?;
 
     let amount = Hbar::from_tinybars(drip.amount_tinybar);
     let explorer = if operator.network.contains("mainnet") {

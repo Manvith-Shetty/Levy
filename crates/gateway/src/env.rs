@@ -85,15 +85,15 @@ pub struct DripEnv {
 }
 
 impl DripEnv {
-    /// Reads `DRIP_AGENT_ACCOUNT_ID`, `DRIP_AMOUNT_TINYBAR` (default 0.1
-    /// HBAR), and `DRIP_INTERVAL_SECS` (default 300).
+    /// Reads `AGENT_ACCOUNT_ID`, `DRIP_AMOUNT_TINYBAR` (default 0.1 HBAR),
+    /// and `DRIP_INTERVAL_SECS` (default 300).
     ///
     /// # Errors
     ///
-    /// Returns an error when `DRIP_AGENT_ACCOUNT_ID` is missing.
+    /// Returns an error when `AGENT_ACCOUNT_ID` is missing.
     pub fn from_env() -> Result<Self, String> {
         Ok(Self {
-            agent_account_id: get_from_env_unsafe("DRIP_AGENT_ACCOUNT_ID")?,
+            agent_account_id: get_from_env_unsafe("AGENT_ACCOUNT_ID")?,
             amount_tinybar: get_from_env_unsafe("DRIP_AMOUNT_TINYBAR").unwrap_or(10_000_000),
             interval_secs: get_from_env_unsafe("DRIP_INTERVAL_SECS").unwrap_or(300),
         })
@@ -160,7 +160,7 @@ impl Config {
             other => return Err(format!("HEDERA_NETWORK must be testnet or mainnet, got {other}")),
         };
 
-        let asset_kind: String = get_from_env_unsafe("ASSET").unwrap_or_else(|_| "hbar".into());
+        let asset_kind: String = get_from_env_unsafe("PAYMENT_ASSET").unwrap_or_else(|_| "hbar".into());
         let asset = match asset_kind.to_lowercase().as_str() {
             "hbar" => AssetInfo {
                 id: "0.0.0".into(),
@@ -176,15 +176,15 @@ impl Config {
                     decimals: deployment.decimals,
                 }
             }
-            other => return Err(format!("ASSET must be hbar or usdc, got {other}")),
+            other => return Err(format!("PAYMENT_ASSET must be hbar or usdc, got {other}")),
         };
 
         // Defaults are tuned for HBAR (8 decimals): 0.001 HBAR per 1k input
         // tokens, 0.004 per 1k output, 0.0001 floor.
         let pricing = PriceModel {
-            per_1k_input: get_from_env_unsafe("PRICE_PER_1K_INPUT").unwrap_or(100_000_u64),
-            per_1k_output: get_from_env_unsafe("PRICE_PER_1K_OUTPUT").unwrap_or(400_000_u64),
-            minimum: get_from_env_unsafe("PRICE_MINIMUM").unwrap_or(10_000_u64),
+            per_1k_input: get_from_env_unsafe("INPUT_PRICE_PER_1K").unwrap_or(100_000_u64),
+            per_1k_output: get_from_env_unsafe("OUTPUT_PRICE_PER_1K").unwrap_or(400_000_u64),
+            minimum: get_from_env_unsafe("MIN_PAYMENT").unwrap_or(10_000_u64),
         };
 
         let port: u16 = get_from_env_unsafe("PORT").unwrap_or(4021);
@@ -204,8 +204,8 @@ impl Config {
             _ => None,
         };
 
-        let pay_to: String = get_from_env_unsafe("HEDERA_PAY_TO_ACCOUNT_ID").map_err(|e| {
-            format!("HEDERA_PAY_TO_ACCOUNT_ID is required (the account payments credit): {e}")
+        let pay_to: String = get_from_env_unsafe("PAYMENT_ACCOUNT_ID").map_err(|e| {
+            format!("PAYMENT_ACCOUNT_ID is required (the account payments credit): {e}")
         })?;
 
         let upstream = get_from_env_unsafe::<String>("OPENAI_BASE_URL")
@@ -229,7 +229,7 @@ impl Config {
             pay_to: pay_to.clone(),
             pay_to_address: pay_to
                 .parse()
-                .map_err(|e| format!("HEDERA_PAY_TO_ACCOUNT_ID: {e}"))?,
+                .map_err(|e| format!("PAYMENT_ACCOUNT_ID: {e}"))?,
             asset,
             pricing,
             facilitator_url: get_from_env_unsafe("FACILITATOR_URL")
