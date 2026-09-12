@@ -5,10 +5,15 @@ import type {
   ServiceManifest,
 } from './types'
 
-// Every call goes through /api, which vite.config.ts proxies to the
-// gateway (GATEWAY_URL, default http://localhost:4021) — see that file for
-// why this exists instead of calling the gateway directly.
-const BASE = '/api'
+// By default every call goes through same-origin /api — in dev,
+// vite.config.ts proxies that to the gateway (VITE_GATEWAY_URL, default
+// http://localhost:4021); in production, whatever serves the built dist/
+// needs to proxy /api/* the same way (see .env.example).
+//
+// Set VITE_GATEWAY_URL at build time to skip the proxy and call the gateway
+// directly instead — only do this once the gateway sends CORS headers for
+// this origin, which it doesn't yet.
+const BASE = import.meta.env.VITE_GATEWAY_URL || '/api'
 
 export class ApiError extends Error {
   status: number

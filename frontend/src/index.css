@@ -1,5 +1,213 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Leash design tokens.
+
+   Two hues carry the product's core idea and are never used decoratively:
+     aqua   = authority this agent still holds
+     violet = authority it has handed to children
+   Amber and coral are pressure and failure. Everything else is grey.
+--------------------------------------------------------------------------- */
+@theme {
+  --color-canvas: #08090b;
+  --color-surface: #101216;
+  --color-raised: #171a20;
+  --color-sunken: #0c0e11;
+  --color-line: #22252b;
+  --color-hairline: #1a1d23;
+  --color-line-strong: #2f333b;
+
+  --color-ink: #e8ebef;
+  --color-ink-dim: #a2a9b4;
+  --color-muted: #858c97;
+  --color-faint: #5a616b;
+
+  --color-authority: #35e0ae;
+  --color-authority-dim: #1b7a61;
+  --color-delegated: #7a6bff;
+  --color-delegated-dim: #3c357f;
+  --color-warn: #f2b13c;
+  --color-warn-dim: #7a5a1c;
+  --color-blocked: #ff5b66;
+  --color-blocked-dim: #7d2c32;
+  --color-idle: #6a7280;
+
+  /* Depth: base → raised → floating. Every shadow is layered and tinted
+     toward the canvas green-black, never a flat grey drop. */
+  --shadow-raised:
+    inset 0 1px 0 rgb(255 255 255 / 0.025),
+    0 1px 2px rgb(1 8 6 / 0.35),
+    0 8px 24px -14px rgb(1 10 8 / 0.55);
+  --shadow-floating:
+    inset 0 1px 0 rgb(255 255 255 / 0.04),
+    0 2px 6px rgb(1 8 6 / 0.35),
+    0 24px 48px -18px rgb(2 12 9 / 0.75),
+    0 40px 90px -40px rgb(53 224 174 / 0.07);
+  --shadow-glow-authority: 0 0 0 1px rgb(53 224 174 / 0.35), 0 10px 30px -12px rgb(53 224 174 / 0.35);
+
+  --ease-spring: cubic-bezier(0.34, 1.36, 0.64, 1);
+  --ease-out-soft: cubic-bezier(0.2, 0.9, 0.3, 1);
+
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* Two faint light sources — authority (aqua) top-left, delegation (violet)
+     top-right — so surfaces read as lit from the tree, not pasted on black. */
+  background:
+    radial-gradient(1100px 520px at 12% -8%, rgb(53 224 174 / 0.055), transparent 60%),
+    radial-gradient(900px 480px at 96% -12%, rgb(122 107 255 / 0.06), transparent 62%),
+    radial-gradient(1400px 700px at 50% 120%, rgb(53 224 174 / 0.025), transparent 70%),
+    var(--color-canvas);
+  background-attachment: fixed;
+}
+
+/* Film grain over everything, below the UI. An SVG turbulence tile keeps it
+   crisp at any density without shipping an image. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+/* Headings and every number read in Space Grotesk: it has the flat terminals
+   and even colour that keep dense figure tables legible at small sizes. */
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+h1 {
+  letter-spacing: -0.03em;
+}
+
+/* Running copy — descriptions, hints, explanations — gets room to breathe.
+   Tables and figures keep their own tight leading. */
+.copy {
+  line-height: 1.7;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-authority) 30%, transparent);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--color-authority);
+  outline-offset: 2px;
+}
+/* Text fields show focus through their own border and ring instead. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+
+/* Scrollbars, kept out of the way of the data. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #23262d;
+  border: 3px solid var(--color-canvas);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #33373f;
+}
+
+/* Pressed feedback for anything clickable. Uses the standalone `scale`
+   property so it composes with Tailwind's `translate` utilities. */
+@utility press {
+  transition-property: scale, translate, opacity;
+  transition-duration: 180ms;
+  transition-timing-function: var(--ease-spring);
+  &:active {
+    scale: 0.975;
+  }
+}
+
+/* Hover wash for buttons, rows and nav items: an overlay whose opacity
+   animates, so no colour property is ever transitioned. */
+@utility wash {
+  position: relative;
+  isolation: isolate;
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: rgb(255 255 255 / 0.045);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms var(--ease-out-soft);
+    z-index: -1;
+  }
+  &:hover::after {
+    opacity: 1;
+  }
+}
+
+@utility numeric {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* The live dot on the activity panel: the only ambient motion in the app. */
+@keyframes leash-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.82); }
+}
+@keyframes leash-ring {
+  0% { opacity: 0.5; transform: scale(1); }
+  100% { opacity: 0; transform: scale(2.6); }
+}
+@keyframes leash-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes leash-slide-in {
+  from { transform: translateX(14px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes leash-toast-in {
+  from { transform: translateY(10px) scale(0.98); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+.animate-pulse-dot { animation: leash-pulse 2.4s ease-in-out infinite; }
+.animate-ring { animation: leash-ring 2.4s ease-out infinite; }
+.animate-enter { animation: leash-in 320ms var(--ease-spring) both; }
+.animate-slide-in { animation: leash-slide-in 300ms var(--ease-spring) both; }
+.animate-toast-in { animation: leash-toast-in 340ms var(--ease-spring) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
