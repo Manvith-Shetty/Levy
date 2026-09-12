@@ -3,8 +3,10 @@ import { Link, useParams } from 'react-router-dom'
 import { useLeash } from '../lib/store'
 import { useUI } from '../app/ui'
 import {
+  blockingAncestor,
   dailySpend,
   deriveStatus,
+  effectiveCeiling,
   eventsForAgent,
   spentSince,
   spentToday,
@@ -29,6 +31,8 @@ import { EmptyState } from '../components/common/EmptyState'
 import { SpendingChart } from '../components/spending/SpendingChart'
 import { ActivityFeed } from '../components/activity/ActivityFeed'
 import { IconArrowLeft, IconPlus } from '../components/layout/icons'
+import { RevokeOrRestore } from '../components/agents/AgentActions'
+import { etherscanUrl } from '../lib/config'
 
 type Tab = 'overview' | 'spending' | 'permissions' | 'children' | 'activity'
 
@@ -58,6 +62,7 @@ export function AgentDetail() {
   const stats = statsFor(index, agent.id)
   const status = deriveStatus(agent, index)
   const parent = agent.parentId ? index[agent.parentId] : undefined
+  const blocker = status === 'suspended' ? blockingAncestor(index, agent.id) : undefined
 
   const tabs = [
     { id: 'overview' as const, label: 'Overview' },
@@ -80,13 +85,20 @@ export function AgentDetail() {
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-[26px] leading-tight font-semibold text-ink">{agent.name}</h1>
-          <div className="mt-2">
+          <div className="mt-2 flex flex-wrap items-center gap-2.5">
             <StatusBadge status={status} />
+            {blocker && (
+              <span className="text-[13px] text-muted">
+                Blocked because{' '}
+                <Link to={`/agents/${blocker.id}`} className="text-ink underline-offset-4 hover:underline active:opacity-70">
+                  {blocker.name}
+                </Link>{' '}
+                is {blocker.status}
+              </span>
+            )}
           </div>
         </div>
-        <Button variant="danger" disabled={status === 'revoked'} onClick={() => ui.openRevoke(agent)}>
-          Revoke agent
-        </Button>
+        <RevokeOrRestore agent={agent} status={status} onRevoke={ui.openRevoke} />
       </header>
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
@@ -266,6 +278,7 @@ function PermissionsTab({ agentId }: { agentId: string }) {
   const agent = index[agentId]
   const policy = policies.find((p) => p.id === agent?.policyId)
   if (!agent) return null
+  if (agent.mandate) return <LivePermissions agent={agent} />
   const limits = agent.permissions.find((p) => p.allowed)?.limits
 
   return (
@@ -309,6 +322,80 @@ function PermissionsTab({ agentId }: { agentId: string }) {
   )
 }
 
+/** A live agent's permissions are its ENS text records, checked up the chain. */
+function LivePermissions({ agent }: { agent: Agent }) {
+  const { index } = useLeash()
+  const mandate = agent.mandate!
+  const { hops, limit } = effectiveCeiling(index, agent.id)
+
+  const records: Array<[string, string, string?]> = [
+    ['budget', money(agent.authority)],
+    ['maxPerCall', money(mandate.maxPerCall)],
+    ['ratePerMinute', money(mandate.ratePerMinute), 'Not enforced by the gateway yet'],
+    ['allowedServices', mandate.allowedServices.join(', ') || '—', 'Not enforced by the gateway yet'],
+  ]
+
+  return (
+    <div className="grid items-start gap-4 lg:grid-cols-2">
+      <Card>
+        <CardHead title="Mandate records" hint="ENS text records on this agent's resolver, read live." />
+        {mandate.recordsError ? (
+          <p className="mt-4 rounded-md border border-warn/30 bg-warn/[0.06] px-3 py-2.5 text-[12.5px] text-warn">
+            {mandate.recordsError}. The gateway will refuse this agent until its records are set.
+          </p>
+        ) : (
+          <dl className="mt-3 divide-y divide-hairline">
+            {records.map(([key, value, note]) => (
+              <div key={key} className="flex items-baseline justify-between gap-4 py-2.5">
+                <dt>
+                  <span className="block font-mono text-[12.5px] text-ink-dim">{key}</span>
+                  {note && <span className="block text-[11.5px] text-faint">{note}</span>}
+                </dt>
+                <dd className="numeric text-[13px] text-ink">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        {mandate.resolver && (
+          <a
+            href={etherscanUrl('address', mandate.resolver)}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-3 block border-t border-hairline pt-3 text-[12px] text-muted hover:text-authority active:opacity-70"
+          >
+            Resolver {mandate.resolver.slice(0, 6)}…{mandate.resolver.slice(-4)} on Etherscan
+          </a>
+        )}
+      </Card>
+
+      <Card>
+        <CardHead
+          title="Largest payment right now"
+          hint="The gateway checks every payment against each node's budget and max per call, root to leaf."
+        />
+        {limit && (
+          <p className="mt-4">
+            <span className="numeric text-[28px] leading-none font-semibold text-ink">{money(limit.ceiling)}</span>
+            <span className="mt-1.5 block text-[12.5px] text-muted">
+              Set by {limit.agent.name}'s {limit.limitedBy}
+            </span>
+          </p>
+        )}
+        <ol className="mt-4 space-y-1.5 border-t border-hairline pt-4">
+          {hops.map((hop) => (
+            <li key={hop.agent.id} className="flex items-baseline justify-between gap-4 text-[12.5px]">
+              <span className={hop === limit ? 'text-ink' : 'text-muted'}>{hop.agent.name}</span>
+              <span className={`numeric ${hop === limit ? 'text-authority' : 'text-ink-dim'}`}>
+                {money(hop.ceiling)}
+              </span>
+            </li>
+          ))}
+        </ol>
+      </Card>
+    </div>
+  )
+}
+
 function ChildrenTab({ agentId }: { agentId: string }) {
   const { index } = useLeash()
   const ui = useUI()
@@ -317,7 +404,16 @@ function ChildrenTab({ agentId }: { agentId: string }) {
 
   const stats = statsFor(index, agent.id)
   const children = agent.children.map((id) => index[id]).filter(Boolean)
-  const canDelegate = stats.available > 0 && agent.status !== 'revoked'
+  const mandate = agent.mandate
+  const canDelegate = mandate
+    ? mandate.canParent
+    : stats.available > 0 && agent.status !== 'revoked'
+  const cannotParentReason =
+    mandate && !mandate.canParent
+      ? agent.status !== 'active'
+        ? `${agent.name} is ${agent.status}, so it can't mint children.`
+        : `${agent.name} can't hold children yet — it has no subregistry and isn't bound as a parent in the MandateRegistrar (see contracts/DEPLOY.md).`
+      : undefined
 
   return (
     <div className="space-y-4">
@@ -346,8 +442,18 @@ function ChildrenTab({ agentId }: { agentId: string }) {
           <Stat label="Parent authority" value={money(agent.authority)} />
           <Stat label="Spent directly" value={money(agent.spent)} />
           <Stat label="Delegated" value={money(stats.delegated)} tone="text-delegated" />
-          <Stat label="Available" value={money(stats.available)} tone="text-authority" />
+          {mandate ? (
+            <Stat label="Max per child" value={money(agent.authority)} tone="text-authority" />
+          ) : (
+            <Stat label="Available" value={money(stats.available)} tone="text-authority" />
+          )}
         </dl>
+        {mandate && (
+          <p className="copy mt-4 border-t border-hairline pt-4 text-[12.5px] text-muted">
+            {cannotParentReason ??
+              `The MandateRegistrar checks each new child on-chain against ${agent.name}'s own budget and expiry. Sibling budgets aren't summed.`}
+          </p>
+        )}
       </Card>
 
       {children.length === 0 ? (

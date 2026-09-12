@@ -1,6 +1,8 @@
 import { NavLink } from 'react-router-dom'
+import { hashscanUrl } from '../../lib/config'
+import { treeAsset } from '../../lib/live/adapter'
 import { useLeash } from '../../lib/store'
-import { cx } from '../../lib/utils'
+import { cx, money } from '../../lib/utils'
 import {
   IconActivity,
   IconAgents,
@@ -22,7 +24,7 @@ const NAV = [
 ]
 
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
-  const { network } = useLeash()
+  const { network, live } = useLeash()
   const testnet = network === 'hedera-testnet'
 
   return (
@@ -66,24 +68,74 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       </ul>
 
       <div className="space-y-4 border-t border-hairline px-5 py-4">
-        <div>
-          <p className="text-[11.5px] text-faint">Network</p>
-          <p className="mt-1 text-[13px] text-ink">
-            {testnet ? 'Hedera Testnet' : 'Hedera Mainnet'}
-          </p>
-          <p className="mt-0.5 flex items-center gap-1.5 text-[12px] text-authority">
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="animate-pulse-dot h-1.5 w-1.5 rounded-full bg-authority" />
-            </span>
-            Connected
-          </p>
-        </div>
-        <div>
-          <p className="text-[11.5px] text-faint">Wallet</p>
-          <p className="numeric mt-1 text-[13px] text-ink">0.00 HBAR</p>
-        </div>
+        {live.active ? <LiveFooter /> : (
+          <>
+            <div>
+              <p className="text-[11.5px] text-faint">Network</p>
+              <p className="mt-1 text-[13px] text-ink">
+                {testnet ? 'Hedera Testnet' : 'Hedera Mainnet'}
+              </p>
+              <p className="mt-0.5 flex items-center gap-1.5 text-[12px] text-authority">
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="animate-pulse-dot h-1.5 w-1.5 rounded-full bg-authority" />
+                </span>
+                Connected
+              </p>
+            </div>
+            <div>
+              <p className="text-[11.5px] text-faint">Wallet</p>
+              <p className="numeric mt-1 text-[13px] text-ink">0.00 HBAR</p>
+            </div>
+          </>
+        )}
       </div>
     </nav>
+  )
+}
+
+function SourceLine({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) {
+  return (
+    <p className="mt-1 flex items-center gap-1.5 text-[12.5px] text-ink" title={detail}>
+      <span className={cx('h-1.5 w-1.5 shrink-0 rounded-full', ok ? 'bg-authority' : 'bg-warn')} />
+      {label}
+      {!ok && <span className="text-[11.5px] text-warn">unreachable</span>}
+    </p>
+  )
+}
+
+/** Live mode: which networks are answering, and the one wallet agents pay from. */
+function LiveFooter() {
+  const { live } = useLeash()
+  const payer = live.snapshot?.payer
+  return (
+    <>
+      <div>
+        <p className="text-[11.5px] text-faint">Network</p>
+        <SourceLine label="Hedera Testnet" ok={!live.errors.hcs} detail={live.errors.hcs} />
+        <SourceLine label="ENS · Sepolia" ok={!live.errors.ens} detail={live.errors.ens} />
+      </div>
+      <div>
+        <p className="text-[11.5px] text-faint">Shared agent wallet</p>
+        {payer ? (
+          <>
+            <a
+              href={hashscanUrl('account', payer.id)}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 block font-mono text-[12px] text-ink hover:text-authority active:opacity-70"
+            >
+              {payer.id}
+            </a>
+            <p className="numeric mt-0.5 text-[12.5px] text-ink-dim">
+              {payer.associated ? `${money(payer.token ?? 0)} ${treeAsset.symbol}` : `No ${treeAsset.symbol} yet`}
+              <span className="text-faint"> · {payer.hbar.toFixed(2)} HBAR</span>
+            </p>
+          </>
+        ) : (
+          <p className="mt-1 text-[12.5px] text-faint">{live.ready ? 'Unavailable' : 'Loading…'}</p>
+        )}
+      </div>
+    </>
   )
 }
 

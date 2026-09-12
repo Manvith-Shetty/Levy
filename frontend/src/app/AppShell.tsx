@@ -4,19 +4,22 @@ import { Sidebar } from '../components/layout/Sidebar'
 import { Topbar } from '../components/layout/Topbar'
 import { CommandMenu } from '../components/layout/CommandMenu'
 import { CreateAgentModal } from '../components/agents/CreateAgentModal'
+import { CreateLiveAgentModal } from '../components/agents/CreateLiveAgentModal'
 import { RevokeAgentModal } from '../components/agents/RevokeAgentModal'
 import { AgentDrawer } from '../components/agents/AgentDrawer'
 import { TransactionDrawer } from '../components/activity/TransactionDrawer'
 import { DemoControls } from '../components/demo/DemoControls'
+import { explain } from '../lib/live/wallet'
 import { useLeash } from '../lib/store'
 import { useToast } from './toast'
 import { useUI } from './ui'
 
 export function AppShell() {
   const ui = useUI()
-  const { revokeAgent, index } = useLeash()
+  const { revokeAgent, index, live } = useLeash()
   const { push } = useToast()
   const [navOpen, setNavOpen] = useState(false)
+  const [revoking, setRevoking] = useState(false)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -65,12 +68,21 @@ export function AppShell() {
         onCreateAgent={() => ui.openCreate()}
       />
 
-      <CreateAgentModal
-        key={ui.createOpen ? `open-${ui.createParentId ?? 'root'}` : 'closed'}
-        open={ui.createOpen}
-        onClose={ui.closeCreate}
-        parentId={ui.createParentId}
-      />
+      {live.active ? (
+        <CreateLiveAgentModal
+          key={ui.createOpen ? `live-${ui.createParentId ?? 'root'}` : 'live-closed'}
+          open={ui.createOpen}
+          onClose={ui.closeCreate}
+          parentId={ui.createParentId}
+        />
+      ) : (
+        <CreateAgentModal
+          key={ui.createOpen ? `open-${ui.createParentId ?? 'root'}` : 'closed'}
+          open={ui.createOpen}
+          onClose={ui.closeCreate}
+          parentId={ui.createParentId}
+        />
+      )}
 
       <AgentDrawer
         agent={ui.agentDrawer}
@@ -86,14 +98,33 @@ export function AppShell() {
       <RevokeAgentModal
         agent={ui.revokeTarget}
         onClose={ui.closeRevoke}
-        onConfirm={(agent) => {
-          revokeAgent(agent.id)
-          ui.closeRevoke()
-          push({
-            tone: 'blocked',
-            title: 'Agent revoked',
-            body: `${agent.name} can no longer authorize spending.`,
-          })
+        busy={revoking}
+        onConfirm={async (agent) => {
+          if (!live.active) {
+            revokeAgent(agent.id)
+            ui.closeRevoke()
+            push({
+              tone: 'blocked',
+              title: 'Agent revoked',
+              body: `${agent.name} can no longer authorize spending.`,
+            })
+            return
+          }
+          setRevoking(true)
+          try {
+            if (!live.account) await live.connect()
+            await live.revoke(agent.id)
+            ui.closeRevoke()
+            push({
+              tone: 'blocked',
+              title: 'Agent revoked',
+              body: `${agent.name} can no longer authorize spending. Every agent under it is blocked too.`,
+            })
+          } catch (error) {
+            push({ tone: 'blocked', title: 'Revoke not sent', body: explain(error, agent.account) })
+          } finally {
+            setRevoking(false)
+          }
         }}
       />
 

@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useToast } from '../../app/toast'
+import { etherscanUrl } from '../../lib/config'
+import { explain } from '../../lib/live/wallet'
 import { useLeash } from '../../lib/store'
 import { cx } from '../../lib/utils'
 import { Wordmark } from './Sidebar'
@@ -14,7 +17,7 @@ export function Topbar({
   onOpenCommand: () => void
   onOpenNav: () => void
 }) {
-  const { network, setNetwork, demoMode, setDemoMode } = useLeash()
+  const { network, setNetwork, demoMode, setDemoMode, live } = useLeash()
   const testnet = network === 'hedera-testnet'
 
   return (
@@ -73,29 +76,97 @@ export function Topbar({
           <span className={cx('h-1.5 w-1.5 rounded-full', demoMode ? 'bg-delegated' : 'bg-[#4b525d]')} />
         </button>
 
-        <Dropdown
-          label={
-            <>
-              <span className="animate-pulse-dot h-1.5 w-1.5 rounded-full bg-authority" />
-              {testnet ? 'Hedera Testnet' : 'Hedera Mainnet'}
-              <Chevron />
-            </>
-          }
-          className="hidden sm:inline-flex"
-          items={[
-            { label: 'Hedera Testnet', active: testnet, onSelect: () => setNetwork('hedera-testnet') },
-            { label: 'Hedera Mainnet', active: !testnet, onSelect: () => setNetwork('hedera-mainnet') },
-          ]}
-        />
-
-        <div className="hidden h-8 items-center gap-2 rounded-md border border-line bg-raised px-2.5 text-[12px] text-ink-dim shadow-[var(--shadow-raised)] md:flex">
-          <span className="font-mono text-[11.5px]">{WALLET_ADDRESS}</span>
-          <span className="h-1.5 w-1.5 rounded-full bg-authority" aria-label="Connected" />
-        </div>
+        {live.active ? (
+          <>
+            <div className="hidden h-8 items-center gap-2 rounded-md border border-line bg-raised px-2.5 text-[12px] text-ink-dim shadow-[var(--shadow-raised)] sm:inline-flex">
+              <span
+                className={cx(
+                  'h-1.5 w-1.5 rounded-full',
+                  live.errors.ens || live.errors.hcs ? 'bg-warn' : 'animate-pulse-dot bg-authority',
+                )}
+              />
+              Hedera Testnet · Sepolia
+            </div>
+            <WalletButton />
+          </>
+        ) : (
+          <>
+            <Dropdown
+              label={
+                <>
+                  <span className="animate-pulse-dot h-1.5 w-1.5 rounded-full bg-authority" />
+                  {testnet ? 'Hedera Testnet' : 'Hedera Mainnet'}
+                  <Chevron />
+                </>
+              }
+              className="hidden sm:inline-flex"
+              items={[
+                { label: 'Hedera Testnet', active: testnet, onSelect: () => setNetwork('hedera-testnet') },
+                { label: 'Hedera Mainnet', active: !testnet, onSelect: () => setNetwork('hedera-mainnet') },
+              ]}
+            />
+            <div className="hidden h-8 items-center gap-2 rounded-md border border-line bg-raised px-2.5 text-[12px] text-ink-dim shadow-[var(--shadow-raised)] md:flex">
+              <span className="font-mono text-[11.5px]">{WALLET_ADDRESS}</span>
+              <span className="h-1.5 w-1.5 rounded-full bg-authority" aria-label="Connected" />
+            </div>
+          </>
+        )}
 
         <UserMenu />
       </div>
     </header>
+  )
+}
+
+/** The Sepolia wallet that signs tree changes (revoke, renew, create). */
+function WalletButton() {
+  const { live } = useLeash()
+  const { push } = useToast()
+  const [busy, setBusy] = useState(false)
+
+  if (live.account) {
+    return (
+      <a
+        href={etherscanUrl('address', live.account)}
+        target="_blank"
+        rel="noreferrer"
+        title="Signs tree changes on Sepolia"
+        className="wash press hidden h-8 items-center gap-2 rounded-md border border-line bg-raised px-2.5 text-[12px] text-ink-dim shadow-[var(--shadow-raised)] md:inline-flex"
+      >
+        <span className="font-mono text-[11.5px]">
+          {live.account.slice(0, 6)}…{live.account.slice(-4)}
+        </span>
+        <span className="h-1.5 w-1.5 rounded-full bg-authority" aria-label="Connected" />
+      </a>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={async () => {
+        if (!live.hasWallet) {
+          push({
+            tone: 'info',
+            title: 'No browser wallet found',
+            body: 'Install MetaMask to revoke, renew or create agents on Sepolia. Reading the tree needs no wallet.',
+          })
+          return
+        }
+        setBusy(true)
+        try {
+          await live.connect()
+        } catch (error) {
+          push({ tone: 'blocked', title: 'Wallet not connected', body: explain(error) })
+        } finally {
+          setBusy(false)
+        }
+      }}
+      className="wash press hidden h-8 items-center gap-2 rounded-md border border-authority/40 bg-authority/10 px-2.5 text-[12px] font-medium text-authority disabled:opacity-50 md:inline-flex"
+    >
+      {busy ? 'Connecting…' : 'Connect wallet'}
+    </button>
   )
 }
 

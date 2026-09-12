@@ -8,8 +8,10 @@ use axum::extract::{Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use mandate::{MandateError, MandateNode, MandateResolver, MockResolver};
+use mandate::{MandateError, MandateNode, MandateResolver, MandateViolation, MockResolver, Violation};
+use meter::Refusal;
 
+use crate::hcs::{HcsMessage, now_rfc3339};
 use crate::routes::{AppState, InferQuery, error};
 
 /// The one resolver type the gateway builds a guard against, whichever
@@ -64,9 +66,48 @@ pub async fn gate(
         }
         Err(violation) => {
             tracing::warn!(%agent, node = %violation.node, reason = ?violation.reason, "mandate check failed");
+            record_refusal(&state, &agent, &quote_id, amount, &violation);
             error(StatusCode::FORBIDDEN, &violation.to_string())
         }
     }
+}
+
+/// Keeps a refused payment in the in-memory log and, when HCS is enabled,
+/// publishes it — so a block is as auditable as a settlement.
+fn record_refusal(
+    state: &AppState,
+    agent: &str,
+    quote_id: &str,
+    amount: u64,
+    violation: &MandateViolation,
+) {
+    let (kind, limit) = match violation.reason {
+        Violation::Unresolvable => ("unresolvable", None),
+        Violation::Expired => ("expired", None),
+        Violation::OverBudget { budget } => ("over_budget", Some(budget)),
+        Violation::OverPerCallLimit { max_per_call } => ("over_per_call_limit", Some(max_per_call)),
+    };
+    let cfg = &state.config;
+    let refusal = Refusal {
+        kind: "leash.mandate.refusal.v1".into(),
+        provider: cfg.provider.clone(),
+        quote_id: quote_id.to_owned(),
+        agent: agent.to_owned(),
+        amount,
+        asset: cfg.asset.id.clone(),
+        network: cfg.network.clone(),
+        blocked_by: violation.node.clone(),
+        violation: kind.into(),
+        limit,
+        reason: violation.to_string(),
+        refused_at: now_rfc3339(),
+    };
+    if let Some(tx) = &state.hcs
+        && let Err(error) = tx.send(HcsMessage::Refusal(refusal.clone()))
+    {
+        tracing::warn!(%error, "refusal channel closed");
+    }
+    state.receipts.push_refusal(refusal);
 }
 
 #[cfg(test)]
@@ -132,6 +173,7 @@ mod tests {
             config: Arc::new(cfg),
             quotes: Arc::new(QuoteStore::new(60)),
             receipts: Arc::new(ReceiptLog::default()),
+            hcs: None,
             mandate: Some(guard),
             mandate_mock: Some(mock),
         }
@@ -187,6 +229,49 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(state.quotes.get("q1").unwrap().mandate_path.is_none());
+
+        let refusals = state.receipts.refusals();
+        assert_eq!(refusals.len(), 1, "a block is recorded, not just logged");
+        assert_eq!(refusals[0].agent, "root.eth");
+        assert_eq!(refusals[0].blocked_by, "root.eth");
+        assert_eq!(refusals[0].violation, "expired");
+        assert_eq!(refusals[0].amount, 100);
+        assert_eq!(refusals[0].limit, None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_names_the_ancestor_and_the_ceiling_it_breached() {
+        let mock = MockResolver::new();
+        mock.set("root.eth", healthy_node());
+        mock.set(
+            "leaf.root.eth",
+            MandateNode {
+                max_per_call: 50,
+                parent: Some("root.eth".into()),
+                ..healthy_node()
+            },
+        );
+        let state = test_state(mock);
+        state.quotes.insert("q1".into(), "hi".into(), 16, 100);
+
+        let response = infer(&state, "q1", "leaf.root.eth").await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let refusal = &state.receipts.refusals()[0];
+        assert_eq!(refusal.agent, "leaf.root.eth");
+        assert_eq!(refusal.blocked_by, "leaf.root.eth");
+        assert_eq!(refusal.violation, "over_per_call_limit");
+        assert_eq!(refusal.limit, Some(50));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_request_is_not_recorded_as_a_refusal() {
+        let state = test_state(MockResolver::new());
+
+        let response = infer(&state, "no-such-quote", "root.eth").await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.receipts.refusals().is_empty());
     }
 
     #[tokio::test]

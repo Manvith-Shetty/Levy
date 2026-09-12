@@ -2,12 +2,18 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from 'react'
 import { buildInitialState, SERVICES } from '../data/mockData'
+import { config } from './config'
+import { adapt, type LiveModel, type LiveSnapshot, type SourceKey } from './live/adapter'
+import type { EnsNode } from './live/ens'
+import { useLiveData } from './live/useLiveData'
+import * as wallet from './live/wallet'
 import { indexAgents, spentToday, statsFor } from './selectors'
 import type {
   ActivityEvent,
@@ -48,10 +54,32 @@ interface LeashActions {
   reset: () => void
 }
 
+/** Everything about the live deployment the UI needs beyond the shared model. */
+export interface LiveContext {
+  /** True when the dashboard is showing live data rather than the demo. */
+  active: boolean
+  /** True once the first snapshot has arrived. */
+  ready: boolean
+  refreshing: boolean
+  errors: Partial<Record<SourceKey, string>>
+  warnings: string[]
+  snapshot: LiveSnapshot | null
+  nodes: Record<string, EnsNode>
+  refresh: () => Promise<void>
+  /** Browser wallet used to sign tree changes on Sepolia. */
+  account?: string
+  hasWallet: boolean
+  connect: () => Promise<string>
+  revoke: (agentId: string) => Promise<string>
+  renew: (agentId: string) => Promise<string>
+  create: (spec: wallet.ChildSpec, onStep: (step: wallet.CreateStep) => void) => Promise<string[]>
+}
+
 type LeashContextValue = LeashState & LeashActions & {
   index: Record<string, Agent>
   agentById: (id: string) => Agent | undefined
   policyFor: (agent?: Agent) => Policy | undefined
+  live: LiveContext
 }
 
 const LeashContext = createContext<LeashContextValue | null>(null)
@@ -64,7 +92,7 @@ function initialState(): LeashState {
     policies: seed.policies,
     services: seed.services,
     network: 'hedera-testnet',
-    demoMode: true,
+    demoMode: config.defaultMode === 'demo',
     notifications: {
       nearingBudget: true,
       expiration: true,
@@ -102,11 +130,96 @@ export function LeashProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
-  const index = useMemo(() => indexAgents(state.agents), [state.agents])
+  // Live mode: the same model, built from Sepolia + Hedera instead of mock data.
+  const liveData = useLiveData(!state.demoMode)
+  const model: LiveModel | null = useMemo(
+    () => (liveData.snapshot ? adapt(liveData.snapshot) : null),
+    [liveData.snapshot],
+  )
+  const view = useMemo(
+    () =>
+      state.demoMode
+        ? state
+        : {
+            ...state,
+            agents: model?.agents ?? [],
+            events: model?.events ?? [],
+            policies: model?.policies ?? [],
+            services: model?.services ?? [],
+          },
+    [state, model],
+  )
+
+  const index = useMemo(() => indexAgents(view.agents), [view.agents])
 
   const policyFor = useCallback(
-    (agent?: Agent) => state.policies.find((p) => p.id === agent?.policyId),
-    [state.policies],
+    (agent?: Agent) => view.policies.find((p) => p.id === agent?.policyId),
+    [view.policies],
+  )
+
+  // Browser wallet (Sepolia) for revoke / renew / create in live mode.
+  const [account, setAccount] = useState<string | undefined>()
+  useEffect(() => {
+    if (state.demoMode || !wallet.hasInjectedWallet()) return
+    void wallet.currentAccount().then(setAccount).catch(() => undefined)
+    const onAccounts = (accounts: unknown) => {
+      const [next] = (accounts as string[]) ?? []
+      setAccount(next)
+    }
+    window.ethereum?.on?.('accountsChanged', onAccounts)
+    return () => window.ethereum?.removeListener?.('accountsChanged', onAccounts)
+  }, [state.demoMode])
+
+  const nodeFor = useCallback(
+    (agentId: string) => {
+      const node = model?.nodes[agentId]
+      if (!node) throw new Error(`${agentId} is not in the live tree.`)
+      return node
+    },
+    [model],
+  )
+
+  const live = useMemo<LiveContext>(
+    () => ({
+      active: !state.demoMode,
+      ready: Boolean(liveData.snapshot),
+      refreshing: liveData.refreshing,
+      errors: liveData.snapshot?.errors ?? {},
+      warnings: model?.warnings ?? [],
+      snapshot: liveData.snapshot,
+      nodes: model?.nodes ?? {},
+      refresh: liveData.refresh,
+      account,
+      hasWallet: wallet.hasInjectedWallet(),
+      connect: async () => {
+        const next = await wallet.connect()
+        setAccount(next)
+        return next
+      },
+      revoke: async (agentId) => {
+        const hash = await wallet.revoke(nodeFor(agentId))
+        await liveData.refresh()
+        return hash
+      },
+      renew: async (agentId) => {
+        const node = nodeFor(agentId)
+        const parent = node.parent ? model?.nodes[node.parent] : undefined
+        // Restore to the parent's expiry (a child can't usefully outlive it),
+        // or 90 days out at the root — the same window the deploy used.
+        const seconds = parent?.expiresAt
+          ? Math.floor(parent.expiresAt / 1000)
+          : Math.floor(Date.now() / 1000) + 90 * 86_400
+        const hash = await wallet.renew(node, BigInt(seconds))
+        await liveData.refresh()
+        return hash
+      },
+      create: async (spec, onStep) => {
+        const hashes = await wallet.createChild(spec, onStep)
+        await liveData.refresh()
+        return hashes
+      },
+    }),
+    [state.demoMode, liveData, model, account, nodeFor],
   )
 
   const createAgent = useCallback((draft: AgentDraft): CreateResult => {
@@ -383,7 +496,8 @@ export function LeashProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<LeashContextValue>(
     () => ({
-      ...state,
+      ...view,
+      live,
       index,
       agentById: (id: string) => index[id],
       policyFor,
@@ -396,7 +510,8 @@ export function LeashProvider({ children }: { children: ReactNode }) {
       reset,
     }),
     [
-      state,
+      view,
+      live,
       index,
       policyFor,
       createAgent,

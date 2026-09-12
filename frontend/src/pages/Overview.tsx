@@ -10,13 +10,15 @@ import { Kpi } from '../components/common/Kpi'
 import { AgentTree } from '../components/agents/AgentTree'
 import { LiveActivity, LiveBadge } from '../components/activity/LiveActivity'
 import { IconPlus } from '../components/layout/icons'
-import { SkeletonKpis } from '../components/common/Skeleton'
+import { Skeleton, SkeletonKpis } from '../components/common/Skeleton'
+import { LiveNotice } from '../components/layout/LiveNotice'
 import { useBootDelay } from '../hooks/useBootDelay'
 
 export function Overview() {
-  const { agents, events } = useLeash()
+  const { agents, events, live } = useLeash()
   const ui = useUI()
-  const ready = useBootDelay()
+  const booted = useBootDelay()
+  const ready = booted && (!live.active || live.ready)
   const [selected, setSelected] = useState<string | undefined>()
 
   const totals = useMemo(() => portfolioTotals(agents, events), [agents, events])
@@ -34,6 +36,8 @@ export function Overview() {
           </Button>
         }
       />
+
+      <LiveNotice />
 
       {!ready ? (
         <SkeletonKpis />
@@ -69,7 +73,23 @@ export function Overview() {
           <Legend />
         </div>
         <div className="px-2 pt-2 pb-5">
-          {roots.map((root) => (
+          {!ready && (
+            <div className="flex flex-col items-center gap-10 py-6">
+              <Skeleton className="h-[112px] w-[192px] rounded-lg" />
+              <div className="flex gap-6">
+                <Skeleton className="h-[112px] w-[192px] rounded-lg" />
+                <Skeleton className="h-[112px] w-[192px] rounded-lg" />
+              </div>
+            </div>
+          )}
+          {ready && roots.length === 0 && (
+            <p className="copy px-3 py-12 text-center text-[13px] text-muted">
+              {live.active
+                ? 'No agents found under the configured top registry. Check VITE_ENS_TOP_REGISTRY and VITE_ENS_FROM_BLOCK.'
+                : 'No agents yet. Create one to start delegating authority.'}
+            </p>
+          )}
+          {ready && roots.map((root) => (
             <AgentTree
               key={root.id}
               rootId={root.id}

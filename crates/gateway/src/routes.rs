@@ -8,13 +8,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use mandate::{MandateGuard, MandateNode, MockResolver};
 use meter::{
-    InferResponse, QuoteRequest, QuoteResponse, Receipt, ServiceManifest, Usage, count_tokens,
+    InferResponse, QuoteRequest, QuoteResponse, Receipt, Refusal, ServiceManifest, Usage,
+    count_tokens,
 };
 use serde::Deserialize;
 use time::{Duration, OffsetDateTime};
 
 use crate::env::Config;
-use crate::hcs::ReceiptLog;
+use crate::hcs::{HcsMessage, ReceiptLog};
 use crate::inference;
 use crate::mandate_guard::AnyResolver;
 use crate::quotes::QuoteStore;
@@ -26,8 +27,12 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Issued quotes.
     pub quotes: Arc<QuoteStore>,
-    /// Settlement receipts served by `GET /v1/receipts`.
+    /// Settlement receipts and mandate refusals, served by `GET /v1/receipts`
+    /// and `GET /v1/refusals`.
     pub receipts: Arc<ReceiptLog>,
+    /// HCS publisher, when enabled — the mandate guard sends refusals here so
+    /// the topic records every decision, not just settlements.
+    pub hcs: Option<tokio::sync::mpsc::UnboundedSender<HcsMessage>>,
     /// The mandate guard gating `/v1/infer`, when `MANDATE_MODE != off`.
     pub mandate: Option<Arc<MandateGuard<AnyResolver>>>,
     /// The mock resolver backing the guard, when `MANDATE_MODE = mock` —
@@ -164,6 +169,11 @@ pub async fn infer(State(state): State<AppState>, Query(query): Query<InferQuery
 /// `GET /v1/receipts` — the settlement audit trail this provider has written.
 pub async fn receipts(State(state): State<AppState>) -> Json<Vec<Receipt>> {
     Json(state.receipts.snapshot())
+}
+
+/// `GET /v1/refusals` — payments the mandate guard blocked, newest last.
+pub async fn refusals(State(state): State<AppState>) -> Json<Vec<Refusal>> {
+    Json(state.receipts.refusals())
 }
 
 /// Body of `POST /v1/mandate/seed`.

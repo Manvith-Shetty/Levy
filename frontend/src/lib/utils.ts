@@ -17,13 +17,35 @@ const usdWhole = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 0,
 })
 
-/** Whole dollars unless the cents carry information. */
+/** Sub-cent amounts are the norm for metered payments; keep their digits. */
+const usdSmall = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 6,
+})
+
+/**
+ * Dollars (the dashboard's asset is USDC). Whole numbers drop the cents,
+ * amounts under a dollar keep up to six decimals so a $0.000526 payment
+ * doesn't render as $0.00.
+ */
 export function money(value: number): string {
-  return Number.isInteger(value) ? usdWhole.format(value) : usd.format(value)
+  if (!Number.isFinite(value)) return '—'
+  if (Number.isInteger(value)) return usdWhole.format(value)
+  if (Math.abs(value) < 1) return usdSmall.format(value)
+  return usd.format(value)
 }
 
 export function moneyExact(value: number): string {
-  return usd.format(value)
+  return Math.abs(value) < 1 && value !== 0 ? usdSmall.format(value) : usd.format(value)
+}
+
+/** An amount in some other asset (e.g. an HBAR receipt), as `0.000526 HBAR`. */
+export function amountIn(value: number, symbol?: string): string {
+  if (!symbol || symbol === 'USDC' || symbol === 'USD') return money(value)
+  const digits = Math.abs(value) < 1 ? 8 : 4
+  return `${Number(value.toFixed(digits)).toString()} ${symbol}`
 }
 
 export function percent(value: number, digits = 1): string {

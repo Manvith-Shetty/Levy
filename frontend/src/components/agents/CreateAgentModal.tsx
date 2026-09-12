@@ -6,7 +6,7 @@ import type { AgentDraft, ResourceKind } from '../../lib/types'
 import { cx, money, RESOURCES, ratio, resourceLabel } from '../../lib/utils'
 import { Modal, ModalFoot, ModalHead } from '../common/Modal'
 import { Button } from '../common/Button'
-import { Checkbox, Label, MoneyInput, Radio, Select, TextInput, Textarea } from '../common/Field'
+import { Checkbox, DecimalInput, Label, MoneyInput, Radio, Select, TextInput, Textarea } from '../common/Field'
 import { useToast } from '../../app/toast'
 
 const STEPS = ['Identity', 'Authority', 'Permissions', 'Expiration'] as const
@@ -263,13 +263,11 @@ export function CreateAgentModal({
                 ).map(([key, label, ceiling]) => (
                   <div key={key}>
                     <Label hint={ceiling ? `≤ ${money(ceiling)}` : undefined}>{label}</Label>
-                    <TextInput
-                      inputMode="decimal"
+                    <DecimalInput
                       value={draft.limits[key] ?? ''}
                       placeholder={ceiling ? String(ceiling) : '—'}
-                      onChange={(e) => {
-                        const raw = e.target.value.replace(/[^0-9.]/g, '')
-                        const value = raw === '' ? undefined : Math.min(Number(raw), ceiling ?? Infinity)
+                      onValueChange={(next) => {
+                        const value = next === '' ? undefined : Math.min(next, ceiling ?? Infinity)
                         patch({ limits: { ...draft.limits, [key]: value } })
                       }}
                     />
@@ -295,12 +293,9 @@ export function CreateAgentModal({
                   </div>
                   <div>
                     <Label hint="per instance">Maximum hourly cost</Label>
-                    <TextInput
-                      inputMode="decimal"
+                    <DecimalInput
                       value={draft.maxHourlyCost}
-                      onChange={(e) =>
-                        patch({ maxHourlyCost: Number(e.target.value.replace(/[^0-9.]/g, '')) || 0 })
-                      }
+                      onValueChange={(next) => patch({ maxHourlyCost: next === '' ? 0 : next })}
                     />
                   </div>
                 </div>

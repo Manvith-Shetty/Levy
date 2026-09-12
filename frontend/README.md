@@ -1,68 +1,90 @@
 # Leash dashboard
 
-The Leash control-plane UI: an agent authority tree, spending, activity, policies,
-services and settings. Built with React + Vite + Tailwind.
+The Leash control plane: the agent authority tree, spending, the audit log,
+policies, services and settings. React + Vite + Tailwind.
 
-Runs entirely on generated mock data (`src/data/mockData.ts`) today — every
-action (create/revoke an agent, simulate a payment) mutates local state via
-`src/lib/store.tsx`, nothing hits a network. A client for the `gateway`'s HTTP
-API already exists at `src/lib/gateway/` but isn't wired into any screen yet;
-see "Connecting to the gateway" below for what that takes.
+It runs in two modes, switched by the **Demo Mode** toggle in the topbar:
+
+- **Live (default)** — reads the real deployment: the ENSv2 mandate tree on
+  Sepolia, and every receipt and refusal the gateway publishes to its HCS topic
+  on Hedera testnet. Revoke, restore and create are real Sepolia transactions
+  signed in your browser wallet.
+- **Demo** — generated data and a simulation panel, for walking through the
+  product without any network.
 
 ## Run it
 
 ```bash
 npm install
-npm run dev
+npm run dev          # http://localhost:5173
 ```
 
-Open http://localhost:5173.
+No `.env` is needed: every setting defaults to the public deployment. To point
+at a redeploy, copy `.env.example` to `.env` and override what changed.
 
-## Environment variables
+## Where live data comes from
 
-Copy `.env.example` to `.env` and adjust as needed — see that file for the
-full explanation. The short version: `VITE_GATEWAY_URL` only matters once a
-screen is calling `src/lib/gateway/api.ts`; nothing in the running app reads
-it yet.
+| What | Source | Notes |
+|---|---|---|
+| Agent tree, budgets, expiries | Sepolia RPC, straight from the browser | Rebuilt from registry + registrar events from the deploy block, then current state (expiry, resolver, subregistry, text records) read in batched calls — the same walk `crates/mandate` does for the gateway. |
+| Payments and refusals | HCS topic via the Hedera mirror node | The gateway publishes both to one topic (`kind` tells them apart), so the log survives gateway restarts and anyone can replay it. |
+| Manifest, in-memory receipts and refusals | The gateway, through `/api` | Optional — HCS already carries the same records. |
+| Shared agent wallet balance | Hedera mirror node | Every demo agent pays from `VITE_HEDERA_PAYER_ACCOUNT`. |
 
-## Connecting to the gateway
+Amounts: on-chain budgets and receipt amounts are raw integers. The dashboard
+reads them as USDC (6 decimals — `VITE_ASSET_*`), so the live tree's
+`100000 / 50000 / 10000` budgets are $0.10 / $0.05 / $0.01. Receipts settled in
+another asset (e.g. HBAR) are listed with their own unit and never added to
+USDC spend.
 
-The gateway must already be running (see `crates/gateway/README` /
-`.env.example`). To wire a screen to it: call the functions in
-`src/lib/gateway/api.ts` instead of (or alongside) `src/lib/store.tsx`'s mock
-actions.
+What the gateway enforces on each payment, at every node up the chain:
+`budget` and `maxPerCall` (each against the single payment — there's no
+running total). `ratePerMinute` and `allowedServices` are recorded and shown,
+but not enforced yet. "Spent" in the dashboard is the sum of that agent's
+receipts.
 
-Two known gaps to expect when you do:
+## Writing to the tree
 
-- **No read endpoint for mandate state.** `POST /v1/mandate/seed` and
-  `/revoke` are write-only today, so there's no way to fetch the current
-  mandate tree from the gateway — only receipts (`GET /v1/receipts`) exist.
-  Fixing this means adding a `GET /v1/mandate/tree` (or reading the real
-  ENSv2 registry directly once `MANDATE_MODE=ens` is live).
-- **Seeding/revoking only takes effect** against a gateway running with
-  `MANDATE_MODE=mock` (the default).
+Revoke, restore and create need a browser wallet (MetaMask) on Sepolia, and an
+account holding the registry roles — for the current deployment that's the
+deployer, `0x06de…7c08`. Every transaction is simulated before the wallet is
+asked to sign, so a missing role or a registrar rule comes back as a readable
+reason.
+
+- **Revoke** — one `unregister` on the registry holding the name. Every
+  descendant is blocked by the same transaction; nothing loops over children.
+- **Restore** — `renew` the name, back to its parent's expiry (90 days at the
+  root).
+- **Create** — `MandateRegistrar.registerChild` (which checks budget ≤ parent's
+  and expiry ≤ parent's on-chain), then one resolver `multicall` writing the
+  four text records. Only agents with a subregistry and a registrar binding
+  can have children — today that's `root` and `agent.root`.
 
 ## Deploying
 
-The build is static (`npm run build` → `dist/`), but the gateway has no CORS
-headers of its own, so the browser can't call it cross-origin. Two ways to
-handle that in production, same idea as the dev server's `/api` proxy:
+`npm run build` produces a static `dist/`. The gateway sends no CORS headers,
+so the browser can't call it cross-origin — two ways around that:
 
-**Same-origin proxy (recommended)** — leave `VITE_GATEWAY_URL` unset. The
-app calls relative `/api/*`; configure whatever serves `dist/` to proxy that
-prefix to the gateway, stripping it:
+**Same-origin proxy (recommended)** — leave `VITE_GATEWAY_URL` unset. The app
+calls relative `/api/*`; configure whatever serves `dist/` to proxy that prefix
+to the gateway, stripping it:
 
 - Vercel (`vercel.json`): `{ "rewrites": [{ "source": "/api/:path*", "destination": "https://your-gateway/:path*" }] }`
 - Netlify (`_redirects`): `/api/*  https://your-gateway/:splat  200`
 - Nginx: `location /api/ { rewrite ^/api/(.*)$ /$1 break; proxy_pass https://your-gateway; }`
 
-**Direct calls** — set `VITE_GATEWAY_URL=https://your-gateway` at build
-time. Requests go straight to the gateway, no proxy needed, but only works
-once the gateway sends CORS headers allowing the frontend's origin.
+**Direct calls** — set `VITE_GATEWAY_URL=https://your-gateway` at build time,
+once the gateway sends CORS headers for your origin.
+
+Or skip the gateway entirely with `VITE_GATEWAY_ENABLED=false` — the tree and
+the HCS audit trail are read without it.
+
+In dev, `GATEWAY_PROXY_TARGET` (server-side only, default
+`http://localhost:4021`) is where the Vite dev server forwards `/api`.
 
 ## Screenshot tooling
 
-`node serve.mjs` serves the app at http://localhost:3000 (skips starting a
-second instance if one's already up); `node screenshot.mjs <url> [label]`
-saves a PNG to `./temporary screenshots/` — see that file's header comment
-for interaction flags (`--click`, `--type`, `--key`, `--full`).
+`node serve.mjs` serves the app at http://localhost:3000 (it won't start a
+second instance). `node screenshot.mjs <url> [label]` saves a PNG to
+`./temporary screenshots/` — see its header comment for `--click`, `--type`,
+`--key` and `--full`.

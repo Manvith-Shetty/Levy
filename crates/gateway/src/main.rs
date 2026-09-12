@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! POST /v1/quote            free      meter the prompt -> price -> quote id
+//! GET  /v1/refusals         free      payments the mandate guard blocked
 //! POST /v1/infer?quote=id   402       PAYMENT-REQUIRED (exact, hedera:*)
 //!                           pay       payer-signed TransferTransaction
 //!                           200       verify -> run model -> settle -> receipt
@@ -62,7 +63,7 @@ async fn main() -> Result<()> {
     let hcs_tx = match &cfg.hcs {
         Some(hcs_cfg) => {
             let tx = hcs::spawn_publisher(&cfg.network, hcs_cfg)?;
-            tracing::info!(topic = %hcs_cfg.topic_id, "publishing settlement receipts to HCS");
+            tracing::info!(topic = %hcs_cfg.topic_id, "publishing receipts and refusals to HCS");
             Some(tx)
         }
         None => {
@@ -84,7 +85,7 @@ async fn main() -> Result<()> {
             &cfg,
             Arc::clone(&quotes),
             Arc::clone(&receipts),
-            hcs_tx,
+            hcs_tx.clone(),
         ));
 
     let x402 = X402Middleware::from_resource_server(resource_server)
@@ -119,6 +120,7 @@ async fn main() -> Result<()> {
         config: Arc::clone(&cfg),
         quotes,
         receipts,
+        hcs: hcs_tx,
         mandate,
         mandate_mock,
     };
@@ -130,6 +132,7 @@ async fn main() -> Result<()> {
         .route("/.well-known/x402", get(routes::manifest))
         .route("/v1/quote", post(routes::quote))
         .route("/v1/receipts", get(routes::receipts))
+        .route("/v1/refusals", get(routes::refusals))
         .route(
             "/v1/infer",
             post(routes::infer).layer(paid_layer).layer(

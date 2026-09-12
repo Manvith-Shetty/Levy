@@ -250,3 +250,38 @@ export function spendByAgent(agents: Agent[]): AgentSpend[] {
   const max = Math.max(...rows.map((r) => r.spent), 1)
   return rows.map((row) => ({ ...row, share: row.spent / max }))
 }
+
+/** The nearest ancestor whose own authority is gone, if any — what the guard
+ *  would name when refusing this agent. */
+export function blockingAncestor(index: AgentIndex, id: string): Agent | undefined {
+  return ancestors(index, id).find((a) => a.status === 'revoked' || a.status === 'expired')
+}
+
+export interface CeilingHop {
+  agent: Agent
+  /** min(budget, maxPerCall) at this node, in whole units. */
+  ceiling: number
+  limitedBy: 'budget' | 'max per call'
+}
+
+/**
+ * The largest single payment an agent can make right now: the guard checks
+ * the amount against every node's budget and max-per-call, root to leaf, so
+ * the answer is the smallest of all of them.
+ */
+export function effectiveCeiling(index: AgentIndex, id: string): { hops: CeilingHop[]; limit?: CeilingHop } {
+  const agent = index[id]
+  if (!agent) return { hops: [] }
+  const chain = [...ancestors(index, id).reverse(), agent]
+  const hops = chain.map((a) => {
+    const perCall = a.mandate?.maxPerCall ?? a.authority
+    return perCall < a.authority
+      ? { agent: a, ceiling: perCall, limitedBy: 'max per call' as const }
+      : { agent: a, ceiling: a.authority, limitedBy: 'budget' as const }
+  })
+  const limit = hops.reduce<CeilingHop | undefined>(
+    (min, hop) => (!min || hop.ceiling < min.ceiling ? hop : min),
+    undefined,
+  )
+  return { hops, limit }
+}

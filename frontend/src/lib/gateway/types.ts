@@ -54,6 +54,23 @@ export interface Receipt {
   mandate_path: MandateHop[]
 }
 
+/** A payment the mandate guard blocked before any price tag was issued —
+ * mirrors `meter::Refusal`. Published to the same HCS topic as receipts. */
+export interface Refusal {
+  kind: string
+  provider: string
+  quote_id: string
+  agent: string
+  amount: number
+  asset: string
+  network: string
+  blocked_by: string
+  violation: 'unresolvable' | 'expired' | 'over_budget' | 'over_per_call_limit' | string
+  limit?: number
+  reason: string
+  refused_at: string
+}
+
 export interface SeedMandateRequest {
   name: string
   budget: number

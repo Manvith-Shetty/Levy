@@ -1,4 +1,6 @@
+import { Link } from 'react-router-dom'
 import { useLeash } from '../lib/store'
+import type { Policy } from '../lib/types'
 import { money, resourceLabel } from '../lib/utils'
 import { PageHeader } from '../components/layout/PageHeader'
 import { Button } from '../components/common/Button'
@@ -6,10 +8,33 @@ import { Card } from '../components/common/Card'
 import { Pill } from '../components/common/Badge'
 import { IconPlus } from '../components/layout/icons'
 import { useToast } from '../app/toast'
+import { etherscanUrl } from '../lib/config'
 
 export function Policies() {
-  const { policies, agents } = useLeash()
+  const { policies, agents, live } = useLeash()
   const { push } = useToast()
+
+  if (live.active) {
+    return (
+      <>
+        <PageHeader
+          title="Policies"
+          subtitle="Each agent's policy is its own ENS text records — read live from its resolver on Sepolia."
+        />
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {policies.map((policy) => (
+            <LivePolicyCard key={policy.id} policy={policy} />
+          ))}
+        </div>
+        <p className="copy mt-4 max-w-[72ch] text-[12.5px] text-faint">
+          The gateway enforces <span className="font-mono">budget</span> and{' '}
+          <span className="font-mono">maxPerCall</span> at every node up the chain on each payment.{' '}
+          <span className="font-mono">ratePerMinute</span> and{' '}
+          <span className="font-mono">allowedServices</span> are recorded but not enforced yet.
+        </p>
+      </>
+    )
+  }
 
   return (
     <>
@@ -88,10 +113,57 @@ export function Policies() {
   )
 }
 
-function Line({ label, value }: { label: string; value: string }) {
+function LivePolicyCard({ policy }: { policy: Policy }) {
+  const records = policy.live!
+  return (
+    <Card className="flex flex-col">
+      <div className="flex items-start justify-between gap-3">
+        <Link
+          to={`/agents/${policy.name}`}
+          className="font-mono text-[14px] font-medium text-ink hover:text-authority active:opacity-70"
+        >
+          {policy.name}
+        </Link>
+        <Pill tone={policy.active ? 'authority' : 'neutral'}>{policy.active ? 'Active' : 'Inactive'}</Pill>
+      </div>
+
+      <dl className="mt-4 space-y-2 border-t border-hairline pt-4">
+        <Line label="budget" value={money(records.budget)} mono />
+        <Line label="maxPerCall" value={money(records.maxPerCall)} mono />
+        <Line label="ratePerMinute" value={money(records.ratePerMinute)} mono muted />
+      </dl>
+
+      <div className="mt-4">
+        <p className="mb-2 font-mono text-[12px] text-faint">allowedServices</p>
+        <div className="flex flex-wrap gap-1.5">
+          {records.allowedServices.length === 0 ? (
+            <span className="text-[12.5px] text-faint">None set</span>
+          ) : (
+            records.allowedServices.map((service) => <Pill key={service}>{service}</Pill>)
+          )}
+        </div>
+      </div>
+
+      {records.resolver && (
+        <footer className="mt-auto border-t border-hairline pt-4 text-[12.5px]">
+          <a
+            href={etherscanUrl('address', records.resolver)}
+            target="_blank"
+            rel="noreferrer"
+            className="press text-muted hover:text-authority"
+          >
+            Resolver {records.resolver.slice(0, 6)}…{records.resolver.slice(-4)} →
+          </a>
+        </footer>
+      )}
+    </Card>
+  )
+}
+
+function Line({ label, value, mono, muted }: { label: string; value: string; mono?: boolean; muted?: boolean }) {
   return (
     <div className="flex items-baseline justify-between gap-4">
-      <dt className="text-[12.5px] text-muted">{label}</dt>
+      <dt className={`text-[12.5px] ${mono ? 'font-mono' : ''} ${muted ? 'text-faint' : 'text-muted'}`}>{label}</dt>
       <dd className="numeric text-[13px] text-ink">{value}</dd>
     </div>
   )

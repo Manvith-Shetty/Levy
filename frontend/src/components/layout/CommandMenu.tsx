@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useLeash } from '../../lib/store'
-import { cx, money, shortHash, timeAgo } from '../../lib/utils'
+import { amountIn, cx, money, shortHash, timeAgo } from '../../lib/utils'
+import { KIND_LABEL } from '../activity/eventMeta'
 import { IconSearch } from './icons'
 
 interface Entry {
@@ -80,7 +81,7 @@ export function CommandMenu({
         id: `tx-${event.id}`,
         group: 'Transactions',
         label: shortHash(event.txId!, 10, 6),
-        detail: `${agent?.name ?? 'Unknown'} · ${event.amount ? money(event.amount) : 'delegation'} · ${timeAgo(event.timestamp)}`,
+        detail: `${agent?.name ?? event.agentId} · ${event.amount ? amountIn(event.amount, event.assetSymbol) : KIND_LABEL[event.kind]} · ${timeAgo(event.timestamp)}`,
         run: go(`/activity?event=${event.id}`),
       })
     }

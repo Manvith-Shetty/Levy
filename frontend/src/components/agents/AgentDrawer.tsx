@@ -1,10 +1,11 @@
 import { Link } from 'react-router-dom'
 import { useLeash } from '../../lib/store'
-import { deriveStatus, statsFor } from '../../lib/selectors'
+import { blockingAncestor, deriveStatus, statsFor } from '../../lib/selectors'
 import type { Agent } from '../../lib/types'
 import { formatDate, money } from '../../lib/utils'
 import { Drawer, Row } from '../common/Drawer'
-import { Button, ButtonLink } from '../common/Button'
+import { ButtonLink } from '../common/Button'
+import { RevokeOrRestore } from './AgentActions'
 import { StatusBadge } from '../common/Badge'
 import { AuthorityMeter } from '../common/Meter'
 
@@ -25,26 +26,27 @@ export function AgentDrawer({
   const status = deriveStatus(live, index)
   const parent = live.parentId ? index[live.parentId] : undefined
   const children = live.children.map((id) => index[id]).filter(Boolean)
+  const blocker = status === 'suspended' ? blockingAncestor(index, live.id) : undefined
 
   return (
     <Drawer
       open
       onClose={onClose}
       title={live.name}
-      subtitle={<StatusBadge status={status} size="sm" />}
+      subtitle={
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge status={status} size="sm" />
+          {blocker && (
+            <span className="text-[12px] text-muted">Blocked by {blocker.name}</span>
+          )}
+        </div>
+      }
       footer={
         <div className="flex gap-2">
           <ButtonLink to={`/agents/${live.id}`} variant="secondary" className="flex-1">
             View details
           </ButtonLink>
-          <Button
-            variant="danger"
-            className="flex-1"
-            disabled={status === 'revoked'}
-            onClick={() => onRevoke(live)}
-          >
-            Revoke agent
-          </Button>
+          <RevokeOrRestore agent={live} status={status} onRevoke={onRevoke} className="flex-1" />
         </div>
       }
     >

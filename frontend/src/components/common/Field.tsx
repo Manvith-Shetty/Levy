@@ -1,4 +1,4 @@
-import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react'
+import { useState, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from 'react'
 import { cx } from '../../lib/utils'
 
 const CONTROL =
@@ -27,19 +27,78 @@ export function TextInput({ className, ...rest }: InputHTMLAttributes<HTMLInputE
   return <input className={cx(CONTROL, 'h-9.5', className)} {...rest} />
 }
 
+/** Digits and one decimal point, at most `decimals` places after it. */
+function sanitizeDecimal(raw: string, decimals: number): string {
+  const cleaned = raw.replace(/[^0-9.]/g, '')
+  const dot = cleaned.indexOf('.')
+  if (dot === -1) return cleaned
+  const whole = cleaned.slice(0, dot)
+  const fraction = cleaned.slice(dot + 1).replace(/\./g, '').slice(0, decimals)
+  return `${whole}.${fraction}`
+}
+
+function parseDecimal(text: string): number | '' {
+  return text === '' || text === '.' ? '' : Number(text)
+}
+
+/**
+ * The text a person is typing, kept as text. A number-controlled input turns
+ * `0.` into `0` on the next render and erases the point, so decimals can
+ * never be entered; this shows what was typed for as long as it still means
+ * the parent's value, and falls back to the parent's value when it changes
+ * from outside (a reset, a clamp).
+ */
+function useDecimalText(value: number | '', decimals: number) {
+  const [text, setText] = useState(value === '' ? '' : String(value))
+  const shown = parseDecimal(text) === value ? text : value === '' ? '' : String(value)
+  const accept = (raw: string) => {
+    const next = sanitizeDecimal(raw, decimals)
+    setText(next)
+    return parseDecimal(next)
+  }
+  return { shown, accept }
+}
+
+export function DecimalInput({
+  value,
+  onValueChange,
+  decimals = 6,
+  className,
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'> & {
+  value: number | ''
+  onValueChange: (value: number | '') => void
+  decimals?: number
+}) {
+  const { shown, accept } = useDecimalText(value, decimals)
+  return (
+    <input
+      inputMode="decimal"
+      value={shown}
+      onChange={(e) => onValueChange(accept(e.target.value))}
+      className={cx(CONTROL, 'numeric h-9.5', className)}
+      {...rest}
+    />
+  )
+}
+
 export function MoneyInput({
   value,
   onValueChange,
   max,
   id,
   invalid,
+  decimals = 6,
 }: {
   value: number | ''
   onValueChange: (value: number | '') => void
   max?: number
   id?: string
   invalid?: boolean
+  /** Places after the point; 6 matches USDC, the finest the tree can hold. */
+  decimals?: number
 }) {
+  const { shown, accept } = useDecimalText(value, decimals)
   return (
     <div
       className={cx(
@@ -51,13 +110,11 @@ export function MoneyInput({
       <input
         id={id}
         inputMode="decimal"
-        value={value}
+        value={shown}
         max={max}
-        onChange={(e) => {
-          const raw = e.target.value.replace(/[^0-9.]/g, '')
-          onValueChange(raw === '' ? '' : Number(raw))
-        }}
-        className="numeric h-full w-full bg-transparent px-2 text-[17px] font-semibold text-ink focus:outline-none"
+        placeholder="0.00"
+        onChange={(e) => onValueChange(accept(e.target.value))}
+        className="numeric h-full w-full bg-transparent px-2 text-[17px] font-semibold text-ink placeholder:text-faint focus:outline-none"
       />
     </div>
   )

@@ -179,12 +179,12 @@ impl Config {
             other => return Err(format!("PAYMENT_ASSET must be hbar or usdc, got {other}")),
         };
 
-        // Defaults are tuned for HBAR (8 decimals): 0.001 HBAR per 1k input
-        // tokens, 0.004 per 1k output, 0.0001 floor.
+        let defaults = default_pricing(asset.decimals);
         let pricing = PriceModel {
-            per_1k_input: get_from_env_unsafe("INPUT_PRICE_PER_1K").unwrap_or(100_000_u64),
-            per_1k_output: get_from_env_unsafe("OUTPUT_PRICE_PER_1K").unwrap_or(400_000_u64),
-            minimum: get_from_env_unsafe("MIN_PAYMENT").unwrap_or(10_000_u64),
+            per_1k_input: get_from_env_unsafe("INPUT_PRICE_PER_1K").unwrap_or(defaults.per_1k_input),
+            per_1k_output: get_from_env_unsafe("OUTPUT_PRICE_PER_1K")
+                .unwrap_or(defaults.per_1k_output),
+            minimum: get_from_env_unsafe("MIN_PAYMENT").unwrap_or(defaults.minimum),
         };
 
         let port: u16 = get_from_env_unsafe("PORT").unwrap_or(4021);
@@ -262,5 +262,35 @@ impl Config {
     #[must_use]
     pub fn infer_url(&self) -> String {
         format!("{}v1/infer", self.base_url)
+    }
+}
+
+/// Default price schedule in atomic units of an asset with `decimals`
+/// decimals: 0.001 per 1k input tokens, 0.004 per 1k output, 0.0001 floor —
+/// the same human prices whether the gateway settles in HBAR or USDC.
+#[must_use]
+pub fn default_pricing(decimals: u8) -> PriceModel {
+    let unit = 10u64.pow(u32::from(decimals));
+    PriceModel {
+        per_1k_input: unit / 1_000,
+        per_1k_output: unit * 4 / 1_000,
+        minimum: unit / 10_000,
+    }
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::default_pricing;
+
+    #[test]
+    fn hbar_defaults_are_unchanged() {
+        let p = default_pricing(8);
+        assert_eq!((p.per_1k_input, p.per_1k_output, p.minimum), (100_000, 400_000, 10_000));
+    }
+
+    #[test]
+    fn usdc_defaults_carry_the_same_human_prices() {
+        let p = default_pricing(6);
+        assert_eq!((p.per_1k_input, p.per_1k_output, p.minimum), (1_000, 4_000, 100));
     }
 }

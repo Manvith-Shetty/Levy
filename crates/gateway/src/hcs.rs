@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use hedera::{AccountId, Client, PrivateKey, TopicId, TopicMessageSubmitTransaction};
-use meter::{Receipt, Usage};
+use meter::{Receipt, Refusal, Usage};
 use r402_protocol::payment::SettleResponse;
 use r402_server::{ResourceServerHooks, SettleResultContext};
 use tokio::sync::mpsc;
@@ -64,27 +64,33 @@ pub fn client_for(network: &str, account_id: &str, private_key: &str) -> Result<
     Ok(client)
 }
 
-/// Receipts held in memory so `GET /v1/receipts` works even without HCS.
+/// How many entries of each kind [`ReceiptLog`] keeps.
+const LOG_CAPACITY: usize = 100;
+
+/// Receipts and refusals held in memory so `GET /v1/receipts` and
+/// `GET /v1/refusals` work even without HCS.
 #[derive(Debug, Default)]
 pub struct ReceiptLog {
     entries: Mutex<Vec<Receipt>>,
+    refusals: Mutex<Vec<Refusal>>,
+}
+
+fn push_capped<T>(log: &Mutex<Vec<T>>, item: T) {
+    let mut entries = log.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    entries.push(item);
+    let len = entries.len();
+    if len > LOG_CAPACITY {
+        entries.drain(..len - LOG_CAPACITY);
+    }
 }
 
 impl ReceiptLog {
     /// Appends a receipt, keeping the most recent 100.
     pub fn push(&self, receipt: Receipt) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.push(receipt);
-        let len = entries.len();
-        if len > 100 {
-            entries.drain(..len - 100);
-        }
+        push_capped(&self.entries, receipt);
     }
 
-    /// Snapshot of the log, newest last.
+    /// Snapshot of the receipt log, newest last.
     #[must_use]
     pub fn snapshot(&self) -> Vec<Receipt> {
         self.entries
@@ -92,9 +98,56 @@ impl ReceiptLog {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    /// Appends a refusal, keeping the most recent 100.
+    pub fn push_refusal(&self, refusal: Refusal) {
+        push_capped(&self.refusals, refusal);
+    }
+
+    /// Snapshot of the refusal log, newest last.
+    #[must_use]
+    pub fn refusals(&self) -> Vec<Refusal> {
+        self.refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
-/// Spawns a task that submits receipts to an HCS topic.
+/// Anything the gateway writes to its HCS topic. Receipts and refusals share
+/// one topic; readers tell them apart by each message's `kind` field.
+#[derive(Debug, Clone)]
+pub enum HcsMessage {
+    /// A settled payment.
+    Receipt(Receipt),
+    /// A payment the mandate guard refused.
+    Refusal(Refusal),
+}
+
+impl HcsMessage {
+    fn body(&self) -> serde_json::Result<Vec<u8>> {
+        match self {
+            Self::Receipt(receipt) => serde_json::to_vec(receipt),
+            Self::Refusal(refusal) => serde_json::to_vec(refusal),
+        }
+    }
+
+    fn quote_id(&self) -> &str {
+        match self {
+            Self::Receipt(receipt) => &receipt.quote_id,
+            Self::Refusal(refusal) => &refusal.quote_id,
+        }
+    }
+
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Receipt(_) => "receipt",
+            Self::Refusal(_) => "refusal",
+        }
+    }
+}
+
+/// Spawns a task that submits receipts and refusals to an HCS topic.
 ///
 /// Returns the sender half; dropping every sender ends the task. Submission is
 /// off the request path on purpose: a topic hiccup must not fail a request the
@@ -103,14 +156,17 @@ impl ReceiptLog {
 /// # Errors
 ///
 /// Returns an error when the client or topic id cannot be built.
-pub fn spawn_publisher(network: &str, cfg: &HcsConfig) -> Result<mpsc::UnboundedSender<Receipt>> {
+pub fn spawn_publisher(
+    network: &str,
+    cfg: &HcsConfig,
+) -> Result<mpsc::UnboundedSender<HcsMessage>> {
     let client = client_for(network, &cfg.operator_id, &cfg.operator_key)?;
     let topic = TopicId::from_str(&cfg.topic_id).context("invalid HCS_TOPIC_ID")?;
-    let (tx, mut rx) = mpsc::unbounded_channel::<Receipt>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<HcsMessage>();
 
     tokio::spawn(async move {
-        while let Some(receipt) = rx.recv().await {
-            let Ok(body) = serde_json::to_vec(&receipt) else {
+        while let Some(message) = rx.recv().await {
+            let Ok(body) = message.body() else {
                 continue;
             };
             let submitted = TopicMessageSubmitTransaction::new()
@@ -122,12 +178,13 @@ pub fn spawn_publisher(network: &str, cfg: &HcsConfig) -> Result<mpsc::Unbounded
                 Ok(response) => match response.get_receipt(&client).await {
                     Ok(_) => tracing::info!(
                         topic = %topic,
-                        quote = %receipt.quote_id,
-                        "receipt published to HCS"
+                        quote = %message.quote_id(),
+                        kind = message.label(),
+                        "published to HCS"
                     ),
-                    Err(error) => tracing::warn!(%error, "HCS receipt did not reach consensus"),
+                    Err(error) => tracing::warn!(%error, kind = message.label(), "HCS message did not reach consensus"),
                 },
-                Err(error) => tracing::warn!(%error, "HCS receipt submit failed"),
+                Err(error) => tracing::warn!(%error, kind = message.label(), "HCS submit failed"),
             }
         }
     });
@@ -141,7 +198,7 @@ pub struct ReceiptHook {
     pay_to: String,
     quotes: Arc<QuoteStore>,
     log: Arc<ReceiptLog>,
-    hcs: Option<mpsc::UnboundedSender<Receipt>>,
+    hcs: Option<mpsc::UnboundedSender<HcsMessage>>,
 }
 
 impl ReceiptHook {
@@ -151,7 +208,7 @@ impl ReceiptHook {
         cfg: &Config,
         quotes: Arc<QuoteStore>,
         log: Arc<ReceiptLog>,
-        hcs: Option<mpsc::UnboundedSender<Receipt>>,
+        hcs: Option<mpsc::UnboundedSender<HcsMessage>>,
     ) -> Self {
         Self {
             provider: cfg.provider.clone(),
@@ -171,7 +228,8 @@ fn quote_id_from(resource_url: Option<&str>) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-fn now_rfc3339() -> String {
+/// Current time as RFC 3339, or empty if formatting ever fails.
+pub fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| String::new())
@@ -222,7 +280,7 @@ impl ResourceServerHooks for ReceiptHook {
             );
 
             if let Some(tx) = &self.hcs
-                && let Err(error) = tx.send(receipt.clone())
+                && let Err(error) = tx.send(HcsMessage::Receipt(receipt.clone()))
             {
                 tracing::warn!(%error, "receipt channel closed");
             }

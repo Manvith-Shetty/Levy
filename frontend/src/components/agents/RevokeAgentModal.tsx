@@ -9,12 +9,14 @@ export function RevokeAgentModal({
   agent,
   onClose,
   onConfirm,
+  busy = false,
 }: {
   agent: Agent | null
   onClose: () => void
   onConfirm: (agent: Agent) => void
+  busy?: boolean
 }) {
-  const { index } = useLeash()
+  const { index, live } = useLeash()
   if (!agent) return null
 
   const stats = statsFor(index, agent.id)
@@ -26,7 +28,7 @@ export function RevokeAgentModal({
         id="revoke-title"
         title={`Revoke ${agent.name}?`}
         hint="This will immediately remove the agent's spending authority."
-        onClose={onClose}
+        onClose={busy ? () => undefined : onClose}
       />
 
       <div className="px-6 py-5">
@@ -69,15 +71,24 @@ export function RevokeAgentModal({
           </div>
         )}
 
-        <p className="mt-4 text-[12.5px] text-faint">This action cannot be automatically undone.</p>
+        {live.active ? (
+          <p className="copy mt-4 text-[12.5px] text-muted">
+            Sends one <span className="font-mono text-[12px] text-ink-dim">unregister</span>{' '}
+            transaction on Sepolia from your connected wallet. The gateway's next check walks up
+            through {agent.name}, finds it gone, and refuses — no transaction per child. You can
+            restore it afterwards by renewing it.
+          </p>
+        ) : (
+          <p className="mt-4 text-[12.5px] text-faint">This action cannot be automatically undone.</p>
+        )}
       </div>
 
       <ModalFoot>
-        <Button variant="ghost" onClick={onClose}>
+        <Button variant="ghost" onClick={onClose} disabled={busy}>
           Cancel
         </Button>
-        <Button variant="danger" onClick={() => onConfirm(agent)}>
-          Revoke agent
+        <Button variant="danger" onClick={() => onConfirm(agent)} disabled={busy}>
+          {busy ? 'Confirm in your wallet…' : 'Revoke agent'}
         </Button>
       </ModalFoot>
     </Modal>

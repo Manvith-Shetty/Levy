@@ -216,6 +216,42 @@ pub struct Receipt {
     pub mandate_path: Vec<MandateHop>,
 }
 
+/// One payment the mandate guard refused, before any price tag was issued.
+///
+/// Published to the same HCS topic as [`Receipt`]s (told apart by `kind`) and
+/// served from `GET /v1/refusals`, so the audit trail covers every
+/// authorization decision — not only the ones that settled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Refusal {
+    /// Schema marker, `leash.mandate.refusal.v1`.
+    pub kind: String,
+    /// Provider that refused the request.
+    pub provider: String,
+    /// Quote the refused request tried to redeem.
+    pub quote_id: String,
+    /// ENS subname the request claimed to spend as.
+    pub agent: String,
+    /// Atomic units the request would have cost.
+    pub amount: u64,
+    /// Asset id the amount is denominated in.
+    pub asset: String,
+    /// CAIP-2 network the payment would have settled on.
+    pub network: String,
+    /// ENS subname of the ancestor that failed — may be the agent itself.
+    pub blocked_by: String,
+    /// Machine-readable violation: `unresolvable`, `expired`, `over_budget`
+    /// or `over_per_call_limit`.
+    pub violation: String,
+    /// The ceiling that was breached, for `over_budget` and
+    /// `over_per_call_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// Human-readable reason, as the guard reported it.
+    pub reason: String,
+    /// RFC 3339 timestamp the refusal was recorded.
+    pub refused_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

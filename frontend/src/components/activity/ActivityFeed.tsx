@@ -1,7 +1,7 @@
 import { useLeash } from '../../lib/store'
 import type { ActivityEvent } from '../../lib/types'
-import { cx, money, shortHash, timeAgo, formatTime } from '../../lib/utils'
-import { describe, KIND_LABEL, KIND_TONE } from './eventMeta'
+import { cx, shortHash, timeAgo, formatTime } from '../../lib/utils'
+import { describe, eventAmount, KIND_LABEL, KIND_TONE } from './eventMeta'
 import { EmptyState } from '../common/EmptyState'
 
 export function ActivityFeed({
@@ -57,7 +57,7 @@ export function ActivityFeed({
                       event.kind === 'payment.blocked' ? 'text-blocked line-through' : 'text-ink',
                     )}
                   >
-                    {money(event.amount)}
+                    {eventAmount(event)}
                   </p>
                 )}
                 <p className="mt-0.5 text-[11.5px] text-faint" title={formatTime(event.timestamp)}>
