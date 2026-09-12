@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use meter::{Usage, count_tokens};
 use serde::Deserialize;
 
-use crate::config::Upstream;
+use crate::env::Upstream;
 
 /// A generated completion plus its token accounting.
 #[derive(Debug, Clone)]

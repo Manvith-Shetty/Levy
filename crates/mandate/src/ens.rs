@@ -58,6 +58,17 @@ pub fn http(rpc_url: Url, registry: Address) -> EnsResolver<DynProvider> {
     EnsResolver::new(provider, registry)
 }
 
+/// Builds an [`EnsResolver`] straight from [`EnsEnv::from_env`](crate::EnsEnv::from_env)
+/// — `SEPOLIA_RPC_URL` and `MANDATE_REGISTRY_ADDRESS`.
+///
+/// # Errors
+///
+/// Returns an error when either variable is missing or fails to parse.
+pub fn from_env() -> Result<EnsResolver<DynProvider>, String> {
+    let env = crate::EnsEnv::from_env()?;
+    Ok(http(env.rpc_url, env.registry))
+}
+
 /// ENSIP-1 namehash.
 fn namehash(name: &str) -> B256 {
     if name.is_empty() {

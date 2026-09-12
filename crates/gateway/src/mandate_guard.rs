@@ -84,7 +84,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::config::Config;
+    use crate::env::Config;
     use crate::hcs::ReceiptLog;
     use crate::quotes::QuoteStore;
 

@@ -1,14 +1,14 @@
 //! One-shot helper: creates the HCS topic that carries settlement receipts.
 //!
 //! ```bash
-//! cargo run -p service --bin create-topic
+//! cargo run -p gateway --bin create-topic
 //! # -> put the printed id in HCS_TOPIC_ID
 //! ```
 
-use std::str::FromStr;
-
 use anyhow::{Context, Result};
-use hedera::{AccountId, Client, PrivateKey, TopicCreateTransaction};
+use gateway::env::OperatorEnv;
+use gateway::hcs::{client_for, parse_private_key};
+use hedera::TopicCreateTransaction;
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -16,23 +16,9 @@ fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    let network = std::env::var("HEDERA_NETWORK").unwrap_or_else(|_| "testnet".into());
-    let operator_id =
-        std::env::var("HEDERA_OPERATOR_ID").context("HEDERA_OPERATOR_ID must be set")?;
-    let operator_key =
-        std::env::var("HEDERA_OPERATOR_KEY").context("HEDERA_OPERATOR_KEY must be set")?;
-
-    let client = if network.contains("mainnet") {
-        Client::for_mainnet()
-    } else {
-        Client::for_testnet()
-    };
-
-    let key = parse_private_key(&operator_key)?;
-    client.set_operator(
-        AccountId::from_str(&operator_id).context("invalid HEDERA_OPERATOR_ID")?,
-        key.clone(),
-    );
+    let env = OperatorEnv::from_env().map_err(|e| anyhow::anyhow!(e))?;
+    let client = client_for(&env.network, &env.operator_id, &env.operator_key)?;
+    let key = parse_private_key(&env.operator_key)?;
 
     let receipt = TopicCreateTransaction::new()
         .topic_memo("x402 Hedera metered inference — settlement receipts")
@@ -45,7 +31,7 @@ async fn run() -> Result<()> {
         .context("topic create did not reach consensus")?;
 
     let topic_id = receipt.topic_id.context("receipt carried no topic id")?;
-    let explorer = if network.contains("mainnet") {
+    let explorer = if env.network.contains("mainnet") {
         "mainnet"
     } else {
         "testnet"
@@ -54,19 +40,4 @@ async fn run() -> Result<()> {
     println!("HCS_TOPIC_ID={topic_id}");
     println!("https://hashscan.io/{explorer}/topic/{topic_id}");
     Ok(())
-}
-
-fn parse_private_key(raw: &str) -> Result<PrivateKey> {
-    let trimmed = raw.trim();
-    let s = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-    [
-        PrivateKey::from_str(s).ok(),
-        PrivateKey::from_str_der(s).ok(),
-        PrivateKey::from_str_ecdsa(s).ok(),
-        PrivateKey::from_str_ed25519(s).ok(),
-    ]
-    .into_iter()
-    .flatten()
-    .next()
-    .context("could not parse HEDERA_OPERATOR_KEY")
 }

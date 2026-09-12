@@ -5,6 +5,7 @@ edition = "2024"
 description = "Recursive ENSv2 spending-mandate resolution and the ancestor-chain spend guard."
 
 [dependencies]
+common = { workspace = true }
 meter = { workspace = true }
 
 alloy = { workspace = true }

@@ -14,7 +14,9 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use hedera::{AccountId, Client, Hbar, PrivateKey, ScheduleCreateTransaction, TransferTransaction};
+use gateway::env::{DripEnv, OperatorEnv};
+use gateway::hcs::client_for;
+use hedera::{AccountId, Hbar, ScheduleCreateTransaction, TransferTransaction};
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -28,47 +30,34 @@ fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    let network = std::env::var("HEDERA_NETWORK").unwrap_or_else(|_| "testnet".into());
+    let operator = OperatorEnv::from_env().map_err(|e| anyhow::anyhow!(e))?;
+    let drip = DripEnv::from_env().map_err(|e| anyhow::anyhow!(e))?;
+
+    let client = client_for(&operator.network, &operator.operator_id, &operator.operator_key)?;
     let operator_id =
-        std::env::var("HEDERA_OPERATOR_ID").context("HEDERA_OPERATOR_ID must be set")?;
-    let operator_key =
-        std::env::var("HEDERA_OPERATOR_KEY").context("HEDERA_OPERATOR_KEY must be set")?;
-    let agent_id = std::env::var("DRIP_AGENT_ACCOUNT_ID")
-        .context("DRIP_AGENT_ACCOUNT_ID must be set (the account being credited)")?;
-    let amount_tinybar: i64 = std::env::var("DRIP_AMOUNT_TINYBAR")
-        .unwrap_or_else(|_| "10000000".into()) // 0.1 HBAR
-        .parse()
-        .context("DRIP_AMOUNT_TINYBAR must be an integer")?;
-    let interval_secs: u64 = std::env::var("DRIP_INTERVAL_SECS")
-        .unwrap_or_else(|_| "300".into())
-        .parse()
-        .context("DRIP_INTERVAL_SECS must be an integer")?;
+        AccountId::from_str(&operator.operator_id).context("invalid HEDERA_OPERATOR_ID")?;
+    let agent = AccountId::from_str(&drip.agent_account_id)
+        .context("invalid DRIP_AGENT_ACCOUNT_ID")?;
 
-    let client = if network.contains("mainnet") {
-        Client::for_mainnet()
+    let amount = Hbar::from_tinybars(drip.amount_tinybar);
+    let explorer = if operator.network.contains("mainnet") {
+        "mainnet"
     } else {
-        Client::for_testnet()
+        "testnet"
     };
-    let key = parse_private_key(&operator_key)?;
-    let operator = AccountId::from_str(&operator_id).context("invalid HEDERA_OPERATOR_ID")?;
-    let agent = AccountId::from_str(&agent_id).context("invalid DRIP_AGENT_ACCOUNT_ID")?;
-    client.set_operator(operator, key);
-
-    let amount = Hbar::from_tinybars(amount_tinybar);
-    let explorer = if network.contains("mainnet") { "mainnet" } else { "testnet" };
 
     tracing::info!(
-        %operator, %agent, %amount, interval_secs,
+        %operator_id, %agent, %amount, interval_secs = drip.interval_secs,
         "starting allowance drip"
     );
 
-    let mut ticks = tokio::time::interval(Duration::from_secs(interval_secs));
+    let mut ticks = tokio::time::interval(Duration::from_secs(drip.interval_secs));
     loop {
         ticks.tick().await;
 
         let mut transfer = TransferTransaction::new();
         transfer
-            .hbar_transfer(operator, -amount)
+            .hbar_transfer(operator_id, -amount)
             .hbar_transfer(agent, amount);
 
         let mut schedule = ScheduleCreateTransaction::new();
@@ -94,19 +83,4 @@ async fn run() -> Result<()> {
             Err(error) => tracing::warn!(%error, "allowance drip schedule submit failed"),
         }
     }
-}
-
-fn parse_private_key(raw: &str) -> Result<PrivateKey> {
-    let trimmed = raw.trim();
-    let s = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-    [
-        PrivateKey::from_str(s).ok(),
-        PrivateKey::from_str_der(s).ok(),
-        PrivateKey::from_str_ecdsa(s).ok(),
-        PrivateKey::from_str_ed25519(s).ok(),
-    ]
-    .into_iter()
-    .flatten()
-    .next()
-    .context("could not parse HEDERA_OPERATOR_KEY")
 }

@@ -2441,6 +2441,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
+ "common",
  "dotenvy",
  "hedera",
  "mandate",
@@ -3360,6 +3361,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "common",
  "meter",
  "serde",
  "thiserror",

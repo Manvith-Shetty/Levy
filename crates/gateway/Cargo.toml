@@ -17,6 +17,7 @@ name = "allowance-drip"
 path = "src/bin/allowance_drip.rs"
 
 [dependencies]
+common = { workspace = true }
 meter = { workspace = true }
 mandate = { workspace = true }
 

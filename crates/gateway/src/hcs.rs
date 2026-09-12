@@ -15,7 +15,7 @@ use r402_protocol::payment::SettleResponse;
 use r402_server::{ResourceServerHooks, SettleResultContext};
 use tokio::sync::mpsc;
 
-use crate::config::{Config, HcsConfig};
+use crate::env::{Config, HcsConfig};
 use crate::quotes::QuoteStore;
 
 /// Parses a Hedera private key in any of the formats the portal and SDKs emit.

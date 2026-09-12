@@ -13,7 +13,7 @@ use meter::{
 use serde::Deserialize;
 use time::{Duration, OffsetDateTime};
 
-use crate::config::Config;
+use crate::env::Config;
 use crate::hcs::ReceiptLog;
 use crate::inference;
 use crate::mandate_guard::AnyResolver;

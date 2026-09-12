@@ -9,27 +9,20 @@
 //!                           200       verify -> run model -> settle -> receipt
 //! ```
 
-mod config;
-mod hcs;
-mod inference;
-mod mandate_guard;
-mod quotes;
-mod routes;
-
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::routing::{get, post};
-use config::Config;
-use hcs::{ReceiptHook, ReceiptLog};
-use mandate_guard::AnyResolver;
-use quotes::QuoteStore;
+use gateway::env::{Config, MandateMode};
+use gateway::hcs::{self, ReceiptHook, ReceiptLog};
+use gateway::mandate_guard::{self, AnyResolver};
+use gateway::quotes::QuoteStore;
+use gateway::routes::{self, AppState};
 use r402_facilitator::FacilitatorClient;
 use r402_hedera::HederaExact;
 use r402_http::server::X402Middleware;
 use r402_server::ResourceServer;
-use routes::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,7 +34,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cfg = Arc::new(Config::from_env()?);
+    let cfg = Arc::new(Config::from_env().map_err(|e| anyhow::anyhow!(e))?);
     let quotes = Arc::new(QuoteStore::new(cfg.quote_ttl_secs));
     let receipts = Arc::new(ReceiptLog::default());
 
@@ -50,29 +43,21 @@ async fn main() -> Result<()> {
     // deployed registry — seed and revoke it live via `/v1/mandate/*`. `ens`
     // reads the real PermissionedRegistry on Sepolia. `off` disables the
     // guard entirely.
-    let mandate_mode = std::env::var("MANDATE_MODE").unwrap_or_else(|_| "mock".into());
-    let (mandate, mandate_mock) = match mandate_mode.as_str() {
-        "off" => (None, None),
-        "ens" => {
-            let rpc_url: url::Url = std::env::var("SEPOLIA_RPC_URL")
-                .context("SEPOLIA_RPC_URL is required for MANDATE_MODE=ens")?
-                .parse()
-                .context("SEPOLIA_RPC_URL must be a valid URL")?;
-            let registry: mandate::Address = std::env::var("MANDATE_REGISTRY_ADDRESS")
-                .context("MANDATE_REGISTRY_ADDRESS is required for MANDATE_MODE=ens")?
-                .parse()
-                .context("MANDATE_REGISTRY_ADDRESS must be a hex address")?;
-            let resolver = mandate::http(rpc_url, registry);
+    let mandate_mode = MandateMode::from_env();
+    let (mandate, mandate_mock) = match mandate_mode {
+        MandateMode::Off => (None, None),
+        MandateMode::Ens => {
+            let resolver = mandate::from_env().map_err(|e| anyhow::anyhow!(e))?;
             let guard = mandate::MandateGuard::new(AnyResolver::Ens(resolver));
             (Some(Arc::new(guard)), None)
         }
-        _ => {
+        MandateMode::Mock => {
             let mock = Arc::new(mandate::MockResolver::new());
             let guard = mandate::MandateGuard::new(AnyResolver::Mock(Arc::clone(&mock)));
             (Some(Arc::new(guard)), Some(mock))
         }
     };
-    tracing::info!(mode = %mandate_mode, "mandate guard configured");
+    tracing::info!(mode = ?mandate_mode, "mandate guard configured");
 
     let hcs_tx = match &cfg.hcs {
         Some(hcs_cfg) => {

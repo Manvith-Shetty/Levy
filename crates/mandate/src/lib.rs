@@ -8,11 +8,13 @@
 //! ancestor anywhere in the tree blocks the leaf immediately.
 
 mod ens;
+mod env;
 mod guard;
 mod mock;
 mod resolver;
 
-pub use ens::{EnsResolver, http};
+pub use ens::{EnsResolver, from_env, http};
+pub use env::EnsEnv;
 pub use guard::{MandateGuard, MandateViolation, Violation};
 pub use meter::MandateHop;
 pub use mock::MockResolver;
