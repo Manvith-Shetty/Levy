@@ -9,6 +9,9 @@ pub struct MandateNode {
     pub budget: u64,
     /// Services this node (and everything under it) may spend against.
     pub allowed_services: Vec<String>,
+    /// Assets (token ids or symbols) this node may pay in. Empty means only
+    /// the asset the tree's budgets are denominated in.
+    pub allowed_assets: Vec<String>,
     /// Rate limit, in atomic units per minute.
     pub rate_per_minute: u64,
     /// Ceiling on any single call.

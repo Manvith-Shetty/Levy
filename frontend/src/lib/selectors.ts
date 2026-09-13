@@ -65,7 +65,8 @@ export interface AgentStats {
   childCount: number
 }
 
-const round = (n: number) => Math.round(n * 100) / 100
+/** Micro-dollar precision: live payments are fractions of a cent. */
+const round = (n: number) => Math.round(n * 1e6) / 1e6
 
 export function statsFor(index: AgentIndex, id: string): AgentStats {
   const agent = index[id]
@@ -136,8 +137,8 @@ export function spentSince(events: ActivityEvent[], agentId: string, since: numb
     Math.round(
       approvedFor(events, agentId)
         .filter((e) => new Date(e.timestamp).getTime() >= since)
-        .reduce((sum, e) => sum + (e.amount ?? 0), 0) * 100,
-    ) / 100
+        .reduce((sum, e) => sum + (e.amount ?? 0), 0) * 1e6,
+    ) / 1e6
   )
 }
 
@@ -152,8 +153,8 @@ export function spentThisWeek(events: ActivityEvent[], agentId?: string): number
     Math.round(
       approvedFor(events)
         .filter((e) => new Date(e.timestamp).getTime() >= since)
-        .reduce((sum, e) => sum + (e.amount ?? 0), 0) * 100,
-    ) / 100
+        .reduce((sum, e) => sum + (e.amount ?? 0), 0) * 1e6,
+    ) / 1e6
   )
 }
 
@@ -182,7 +183,7 @@ export function dailySpend(
   return [...buckets.entries()].map(([day, total]) => ({
     day,
     date: new Date(day).toISOString(),
-    total: Math.round(total * 100) / 100,
+    total: round(total),
   }))
 }
 
@@ -195,6 +196,8 @@ export interface Totals {
   blocked: number
   blockedThisWeek: number
   remaining: number
+  /** Authority the roots have handed to their children. */
+  delegated: number
   today: number
   week: number
 }
@@ -203,19 +206,23 @@ export function portfolioTotals(agents: Agent[], events: ActivityEvent[]): Total
   const index = indexAgents(agents)
   const roots = rootAgents(agents)
   const authority = roots.reduce((sum, a) => sum + a.authority, 0)
-  const spent =
-    Math.round(agents.reduce((sum, a) => sum + a.spent, 0) * 100) / 100
+  const spent = round(agents.reduce((sum, a) => sum + a.spent, 0))
+  const delegated = round(
+    roots.reduce(
+      (sum, root) => sum + root.children.reduce((s, id) => s + (index[id]?.authority ?? 0), 0),
+      0,
+    ),
+  )
   const live = agents.filter((a) => a.status !== 'revoked' && a.status !== 'expired')
   const weekStart = startOfDay(new Date()) - 6 * 86_400_000
   const blockedEvents = events.filter((e) => e.kind === 'payment.blocked')
 
   const todayStart = startOfDay(new Date())
-  const today =
-    Math.round(
-      approvedFor(events)
-        .filter((e) => new Date(e.timestamp).getTime() >= todayStart)
-        .reduce((sum, e) => sum + (e.amount ?? 0), 0) * 100,
-    ) / 100
+  const today = round(
+    approvedFor(events)
+      .filter((e) => new Date(e.timestamp).getTime() >= todayStart)
+      .reduce((sum, e) => sum + (e.amount ?? 0), 0),
+  )
 
   return {
     authority,
@@ -227,7 +234,8 @@ export function portfolioTotals(agents: Agent[], events: ActivityEvent[]): Total
     blockedThisWeek: blockedEvents.filter(
       (e) => new Date(e.timestamp).getTime() >= weekStart,
     ).length,
-    remaining: Math.round((authority - spent) * 100) / 100,
+    remaining: round(authority - spent),
+    delegated,
     today,
     week: spentThisWeek(events),
   }
@@ -247,7 +255,7 @@ export function spendByAgent(agents: Agent[]): AgentSpend[] {
     .map((agent) => ({ agent, spent: statsFor(index, agent.id).spent }))
     .filter((row) => row.spent > 0)
     .sort((a, b) => b.spent - a.spent)
-  const max = Math.max(...rows.map((r) => r.spent), 1)
+  const max = Math.max(0, ...rows.map((r) => r.spent)) || 1
   return rows.map((row) => ({ ...row, share: row.spent / max }))
 }
 
@@ -259,25 +267,27 @@ export function blockingAncestor(index: AgentIndex, id: string): Agent | undefin
 
 export interface CeilingHop {
   agent: Agent
-  /** min(budget, maxPerCall) at this node, in whole units. */
+  /** min(remaining authority, maxPerCall) at this node, in whole units. */
   ceiling: number
-  limitedBy: 'budget' | 'max per call'
+  limitedBy: 'remaining authority' | 'max per call'
 }
 
 /**
- * The largest single payment an agent can make right now: the guard checks
- * the amount against every node's budget and max-per-call, root to leaf, so
- * the answer is the smallest of all of them.
+ * The largest single payment an agent can make right now. The policy engine
+ * checks every node root to leaf: the payment must fit what's left of each
+ * node's authority (its budget minus everything its subtree has spent) and
+ * each node's max per call, so the answer is the smallest of all of them.
  */
 export function effectiveCeiling(index: AgentIndex, id: string): { hops: CeilingHop[]; limit?: CeilingHop } {
   const agent = index[id]
   if (!agent) return { hops: [] }
   const chain = [...ancestors(index, id).reverse(), agent]
   const hops = chain.map((a) => {
+    const remaining = Math.max(0, round(a.authority - statsFor(index, a.id).spent))
     const perCall = a.mandate?.maxPerCall ?? a.authority
-    return perCall < a.authority
+    return perCall < remaining
       ? { agent: a, ceiling: perCall, limitedBy: 'max per call' as const }
-      : { agent: a, ceiling: a.authority, limitedBy: 'budget' as const }
+      : { agent: a, ceiling: remaining, limitedBy: 'remaining authority' as const }
   })
   const limit = hops.reduce<CeilingHop | undefined>(
     (min, hop) => (!min || hop.ceiling < min.ceiling ? hop : min),

@@ -82,11 +82,16 @@ function hederaNetwork(network: string): Network {
 
 /** Receipts from HCS and the gateway describe the same payments; merge them. */
 function mergeReceipts(snapshot: LiveSnapshot) {
-  const out = new Map<string, { receipt: Receipt; source: 'hcs' | 'gateway'; at: string }>()
+  const out = new Map<string, { receipt: Receipt; source: 'hcs' | 'gateway'; at: string; sequence?: number }>()
   for (const entry of snapshot.topic) {
     if (entry.kind !== 'receipt') continue
     const key = entry.body.transaction_id || entry.body.quote_id
-    out.set(key, { receipt: entry.body, source: 'hcs', at: entry.body.settled_at || entry.consensusAt })
+    out.set(key, {
+      receipt: entry.body,
+      source: 'hcs',
+      at: entry.body.settled_at || entry.consensusAt,
+      sequence: entry.sequence,
+    })
   }
   for (const receipt of snapshot.gatewayReceipts) {
     const key = receipt.transaction_id || receipt.quote_id
@@ -96,9 +101,10 @@ function mergeReceipts(snapshot: LiveSnapshot) {
 }
 
 function mergeRefusals(snapshot: LiveSnapshot) {
-  const out = new Map<string, { refusal: Refusal; source: 'hcs' | 'gateway' }>()
+  const out = new Map<string, { refusal: Refusal; source: 'hcs' | 'gateway'; sequence?: number }>()
   for (const entry of snapshot.topic) {
-    if (entry.kind === 'refusal') out.set(entry.body.quote_id, { refusal: entry.body, source: 'hcs' })
+    if (entry.kind === 'refusal')
+      out.set(entry.body.quote_id, { refusal: entry.body, source: 'hcs', sequence: entry.sequence })
   }
   for (const refusal of snapshot.gatewayRefusals) {
     if (!out.has(refusal.quote_id)) out.set(refusal.quote_id, { refusal, source: 'gateway' })
@@ -107,9 +113,12 @@ function mergeRefusals(snapshot: LiveSnapshot) {
 }
 
 const VIOLATION_LABEL: Record<string, string> = {
-  expired: 'Mandate expired or revoked',
-  over_budget: 'Exceeds budget',
-  over_per_call_limit: 'Exceeds maximum per call',
+  expired: 'Authority expired or revoked',
+  over_budget: 'Request exceeds the authority',
+  insufficient_authority: 'Request exceeds remaining authority',
+  over_per_call_limit: 'Request exceeds the per-request limit',
+  service_not_permitted: 'Service not permitted by policy',
+  asset_not_permitted: 'Asset not permitted by policy',
   unresolvable: 'Agent is not registered in the tree',
 }
 
@@ -137,7 +146,7 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
   const events: ActivityEvent[] = []
   const ownSpend = new Map<string, number>()
 
-  for (const { receipt, source, at } of mergeReceipts(snapshot)) {
+  for (const { receipt, source, at, sequence } of mergeReceipts(snapshot)) {
     const asset = assetFor(receipt.asset, manifest)
     const counted = asset.id === TREE_ASSET.id
     const path = receipt.mandate_path ?? []
@@ -165,10 +174,12 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
       })),
       payer: receipt.payer,
       source,
+      hcsSequence: sequence,
+      category: receipt.service,
     })
   }
 
-  for (const { refusal, source } of mergeRefusals(snapshot)) {
+  for (const { refusal, source, sequence } of mergeRefusals(snapshot)) {
     const asset = assetFor(refusal.asset, manifest)
     events.push({
       id: `rfsl_${refusal.quote_id}`,
@@ -184,6 +195,8 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
       timestamp: refusal.refused_at,
       network: hederaNetwork(refusal.network),
       source,
+      hcsSequence: sequence,
+      category: refusal.service,
     })
   }
 
@@ -321,81 +334,122 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
     },
   }))
 
-  // --- Services ---------------------------------------------------------------
-  const services: Service[] = []
-  const providers = new Set(events.filter((e) => e.kind === 'payment.approved').map((e) => e.service!))
-  const providerCard = (m: ServiceManifest | NonNullable<ProviderEntry['manifest']>, connected: boolean): Service => {
-    const a = m.asset
-    const price = (atomic: number) => `${units(atomic, a.decimals)} ${a.symbol}`
-    return {
-      id: `svc_${m.provider}`,
-      name: m.provider,
-      category: 'Inference',
-      connected,
-      resource: 'inference',
-      endpoint: m.base_url,
-      details: [
-        { label: 'Model', value: m.model },
-        { label: 'Per 1K input tokens', value: price(m.pricing.per_1k_input) },
-        { label: 'Per 1K output tokens', value: price(m.pricing.per_1k_output) },
-        { label: 'Minimum charge', value: price(m.pricing.minimum) },
-        { label: 'Pays to', value: m.pay_to, href: hashscanUrl('account', m.pay_to) },
-        { label: 'Facilitator', value: m.facilitator.replace(/^https?:\/\//, '') },
-      ],
+  // --- Services: the marketplace agents buy from --------------------------------
+  // Providers come from three places, most live first: the gateway behind
+  // /api, whatever the agent runner discovered, and announcements on the HCS
+  // topic (which is how providers register). One card per provider name.
+  type Listing = {
+    provider: string
+    model: string
+    category: string
+    description: string
+    base_url: string
+    network: string
+    asset: { symbol: string; decimals: number }
+    pricing: { per_1k_input: number; per_1k_output: number; minimum: number }
+    pay_to?: string
+    facilitator?: string
+    connected: boolean
+    registeredVia: 'hcs' | 'configured' | 'gateway'
+    announcedAt?: string
+  }
+  const listings = new Map<string, Listing>()
+  const announced = new Map<string, string>()
+  for (const entry of snapshot.topic) {
+    if (entry.kind === 'announce' && !announced.has(entry.body.provider)) {
+      announced.set(entry.body.provider, entry.body.announced_at || entry.consensusAt)
     }
   }
-  if (manifest) {
-    services.push(providerCard(manifest, !snapshot.errors.gateway))
-    providers.delete(manifest.provider)
-  }
-  // Everything else the agent runner discovers.
+  const fromManifest = (
+    m: ServiceManifest | NonNullable<ProviderEntry['manifest']>,
+    connected: boolean,
+    via: Listing['registeredVia'],
+  ): Listing => ({
+    provider: m.provider,
+    model: m.model,
+    category: (m.category || 'inference').toLowerCase(),
+    description: m.description || '',
+    base_url: m.base_url,
+    network: m.network,
+    asset: m.asset,
+    pricing: m.pricing,
+    pay_to: m.pay_to,
+    facilitator: m.facilitator,
+    connected,
+    registeredVia: announced.has(m.provider) ? 'hcs' : via,
+    announcedAt: announced.get(m.provider),
+  })
+  if (manifest) listings.set(manifest.provider, fromManifest(manifest, !snapshot.errors.gateway, 'gateway'))
   for (const entry of snapshot.providers ?? []) {
-    if (!entry.manifest || services.some((svc) => svc.name === entry.manifest!.provider)) continue
-    services.push(providerCard(entry.manifest, true))
-    providers.delete(entry.manifest.provider)
+    if (entry.manifest && !listings.has(entry.manifest.provider)) {
+      listings.set(entry.manifest.provider, fromManifest(entry.manifest, true, entry.source ?? 'configured'))
+    }
   }
-  for (const provider of providers) {
-    services.push({
-      id: `svc_${provider}`,
-      name: provider,
-      category: 'Inference',
+  for (const entry of snapshot.topic) {
+    if (entry.kind !== 'announce' || listings.has(entry.body.provider)) continue
+    const a = entry.body
+    const decimals = a.asset === TREE_ASSET.symbol ? TREE_ASSET.decimals : a.asset === 'HBAR' ? 8 : 6
+    listings.set(a.provider, {
+      provider: a.provider,
+      model: a.model,
+      category: a.category.toLowerCase(),
+      description: '',
+      base_url: a.base_url,
+      network: a.network,
+      asset: { symbol: a.asset, decimals },
+      pricing: a.pricing,
       connected: false,
-      resource: 'inference',
-      endpoint: 'Seen in HCS receipts — gateway not reachable from here',
+      registeredVia: 'hcs',
+      announcedAt: a.announced_at || entry.consensusAt,
     })
   }
-  const topicId = snapshot.topicId
-  const receiptCount = snapshot.topic.filter((t) => t.kind === 'receipt').length
-  const refusalCount = snapshot.topic.filter((t) => t.kind === 'refusal').length
-  services.push({
-    id: 'svc_hcs',
-    name: 'Hedera Consensus Service',
-    category: 'Audit trail',
-    connected: !snapshot.errors.hcs && Boolean(topicId),
-    resource: 'networking',
-    endpoint: topicId ? `Topic ${topicId}` : 'No topic configured',
-    details: topicId
-      ? [
-          { label: 'Topic', value: topicId, href: hashscanUrl('topic', topicId) },
-          { label: 'Receipts', value: String(receiptCount) },
-          { label: 'Refusals', value: String(refusalCount) },
-        ]
-      : [],
-  })
-  services.push({
-    id: 'svc_ens',
-    name: 'ENSv2 on Sepolia',
-    category: 'Authority',
-    connected: !snapshot.errors.ens,
-    resource: 'networking',
-    endpoint: `Top registry ${shortAddress(config.topRegistry)}`,
-    details: [
-      { label: 'Top registry', value: shortAddress(config.topRegistry), href: etherscanUrl('address', config.topRegistry) },
-      { label: 'Registrar', value: shortAddress(config.registrar), href: etherscanUrl('address', config.registrar) },
-      { label: 'Agents in tree', value: String(nodes.length) },
-      ...(snapshot.ens ? [{ label: 'Read at block', value: snapshot.ens.latestBlock.toString() }] : []),
-    ],
-  })
+
+  // An agent may buy a category when it and every live ancestor allow it.
+  const permits = (name: string, category: string): boolean => {
+    for (let node: EnsNode | undefined = nodeByName[name]; node; node = node.parent ? nodeByName[node.parent] : undefined) {
+      if (node.status !== 'active' || !(node.records?.allowedServices ?? []).includes(category)) return false
+    }
+    return true
+  }
+
+  const services: Service[] = [...listings.values()]
+    .sort((x, y) => x.category.localeCompare(y.category) || x.provider.localeCompare(y.provider))
+    .map((l) => {
+      const price = (atomic: number) => `${units(atomic, l.asset.decimals)} ${l.asset.symbol}`
+      const perJob = l.pricing.per_1k_input === 0 && l.pricing.per_1k_output === 0
+      return {
+        id: `svc_${l.provider}`,
+        name: l.provider,
+        category: l.category.charAt(0).toUpperCase() + l.category.slice(1),
+        connected: l.connected,
+        resource: (['inference', 'compute', 'storage', 'networking'].includes(l.category)
+          ? l.category
+          : 'inference') as Service['resource'],
+        endpoint: l.base_url,
+        listing: {
+          description: l.description,
+          model: l.model,
+          kind: l.category,
+          pricing: perJob
+            ? [`${price(l.pricing.minimum)} per call`]
+            : [
+                `${price(l.pricing.per_1k_input)} / 1K input tokens`,
+                `${price(l.pricing.per_1k_output)} / 1K output tokens`,
+                `${price(l.pricing.minimum)} minimum`,
+              ],
+          asset: l.asset.symbol,
+          network: l.network.includes('mainnet') ? 'Hedera mainnet' : 'Hedera testnet',
+          registeredVia: l.registeredVia,
+          announcedAt: l.announcedAt,
+          authorizedAgents: nodes.filter((n) => n.parent && permits(n.name, l.category)).map((n) => n.name),
+        },
+        details: [
+          { label: 'Endpoint', value: l.base_url.replace(/^https?:\/\//, '') },
+          ...(l.pay_to ? [{ label: 'Pays to', value: l.pay_to, href: hashscanUrl('account', l.pay_to) }] : []),
+          ...(l.facilitator ? [{ label: 'Facilitator', value: l.facilitator.replace(/^https?:\/\//, '') }] : []),
+        ],
+      }
+    })
 
   return { agents, events, policies, services, nodes: nodeByName, warnings }
 }

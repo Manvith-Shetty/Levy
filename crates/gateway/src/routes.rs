@@ -17,7 +17,8 @@ use time::{Duration, OffsetDateTime};
 use crate::env::Config;
 use crate::hcs::{HcsMessage, ReceiptLog};
 use crate::inference;
-use crate::mandate_guard::AnyResolver;
+use crate::ledger::SpendLedger;
+use crate::mandate_guard::{self, AnyResolver};
 use crate::quotes::QuoteStore;
 
 /// Shared state for every handler.
@@ -39,6 +40,8 @@ pub struct AppState {
     /// exposed so `/v1/mandate/seed` and `/v1/mandate/revoke` can drive a
     /// live demo without a deployed ENSv2 registry.
     pub mandate_mock: Option<Arc<MockResolver>>,
+    /// Spending so far per mandate node, replayed from HCS.
+    pub ledger: Arc<SpendLedger>,
 }
 
 pub(crate) fn error(status: StatusCode, message: &str) -> Response {
@@ -61,6 +64,8 @@ pub async fn manifest(State(state): State<AppState>) -> Json<ServiceManifest> {
         facilitator: cfg.facilitator_url.clone(),
         receipts_topic: cfg.hcs.as_ref().map(|h| h.topic_id.clone()),
         x402_version: 2,
+        category: cfg.category.clone(),
+        description: cfg.description.clone(),
     })
 }
 
@@ -176,6 +181,69 @@ pub async fn refusals(State(state): State<AppState>) -> Json<Vec<Refusal>> {
     Json(state.receipts.refusals())
 }
 
+/// Body of `POST /v1/authorize`.
+#[derive(Debug, Deserialize)]
+pub struct AuthorizeRequest {
+    /// ENS name of the agent that would spend.
+    pub agent: String,
+    /// Atomic units of the asset.
+    pub amount: u64,
+    /// Service category; defaults to what this provider sells.
+    pub service: Option<String>,
+    /// Asset symbol or token id; defaults to what this provider is paid in.
+    pub asset: Option<String>,
+}
+
+/// `POST /v1/authorize` — runs the policy engine without paying, recording
+/// or reserving anything. The same evaluation `/v1/infer` runs before it
+/// names a price, so a simulation can't disagree with the real thing.
+pub async fn authorize(State(state): State<AppState>, Json(body): Json<AuthorizeRequest>) -> Response {
+    if state.mandate.is_none() {
+        return error(StatusCode::NOT_FOUND, "this gateway runs without a mandate guard (MANDATE_MODE=off)");
+    }
+    let cfg = &state.config;
+    let asset = body.asset.as_deref().map(|given| {
+        // Accept a symbol or an id; anything unknown is compared as given.
+        [&cfg.asset, &cfg.tree_asset]
+            .into_iter()
+            .find(|a| a.symbol.eq_ignore_ascii_case(given) || a.id.eq_ignore_ascii_case(given))
+            .map_or_else(
+                || mandate::AssetRef {
+                    id: given.to_owned(),
+                    symbol: given.to_uppercase(),
+                },
+                |a| mandate::AssetRef {
+                    id: a.id.clone(),
+                    symbol: a.symbol.clone(),
+                },
+            )
+    });
+    let service = body.service.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+    let decision = mandate_guard::evaluate(&state, &body.agent, body.amount, service.clone(), asset.clone()).await;
+    let spent = state.ledger.spent().await;
+    let spent: std::collections::BTreeMap<_, _> = decision
+        .path
+        .iter()
+        .map(|hop| (hop.name.clone(), spent.get(&hop.name).copied().unwrap_or(0)))
+        .collect();
+    Json(serde_json::json!({
+        "approved": decision.approved(),
+        "agent": body.agent,
+        "amount": body.amount,
+        "service": service.unwrap_or_else(|| cfg.category.clone()),
+        "asset": asset.map_or_else(|| cfg.asset.symbol.clone(), |a| a.symbol),
+        "reason": decision.violation.as_ref().map(ToString::to_string),
+        "blocked_by": decision.violation.as_ref().map(|v| v.node.clone()),
+        "violation": decision.violation.as_ref().map(|v| v.reason.kind()),
+        "checks": decision.checks,
+        "path": decision.path,
+        "spent": spent,
+        "ledger_error": state.ledger.error().await,
+        "provider": cfg.provider,
+    }))
+    .into_response()
+}
+
 /// Body of `POST /v1/mandate/seed`.
 #[derive(Debug, Deserialize)]
 pub struct SeedMandateRequest {
@@ -227,6 +295,7 @@ pub async fn mandate_seed(
         MandateNode {
             budget: body.budget,
             allowed_services: body.allowed_services,
+            allowed_assets: Vec::new(),
             rate_per_minute: body.rate_per_minute,
             max_per_call,
             expires_at,

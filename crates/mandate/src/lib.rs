@@ -15,7 +15,9 @@ mod resolver;
 
 pub use ens::{EnsResolver, from_env, http};
 pub use env::EnsEnv;
-pub use guard::{MandateGuard, MandateViolation, Violation};
+pub use guard::{
+    AssetRef, Check, CheckStatus, Decision, MandateGuard, MandateViolation, SpendRequest, Spent, Violation,
+};
 pub use meter::MandateHop;
 pub use mock::MockResolver;
 pub use resolver::{MandateError, MandateNode, MandateResolver};

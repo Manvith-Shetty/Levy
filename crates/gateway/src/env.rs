@@ -100,6 +100,15 @@ impl DripEnv {
     }
 }
 
+/// Default one-liner for a service category.
+fn describe(category: &str) -> &'static str {
+    match category {
+        "compute" => "GPU compute, billed per job",
+        "data" => "Metered data feed, priced per query",
+        _ => "LLM inference, priced per token",
+    }
+}
+
 /// Optional OpenAI-compatible upstream (LM Studio, Ollama, vLLM, …).
 #[derive(Debug, Clone)]
 pub struct Upstream {
@@ -142,6 +151,39 @@ pub struct Config {
     pub hcs: Option<HcsConfig>,
     /// Upstream model server, when configured.
     pub upstream: Option<Upstream>,
+    /// What kind of service this is (`SERVICE_CATEGORY`, default
+    /// `inference`) — checked against each agent's `allowedServices`.
+    pub category: String,
+    /// One line describing what's sold (`SERVICE_DESCRIPTION`).
+    pub description: String,
+    /// Asset mandate budgets are denominated in (`MANDATE_ASSET`, default
+    /// `usdc`). A payment in anything else is refused unless a node's
+    /// `allowedAssets` record names it.
+    pub tree_asset: AssetInfo,
+    /// Mirror node used to replay the HCS topic into the spend ledger
+    /// (`MIRROR_URL`, defaults to the public one for the network).
+    pub mirror_url: String,
+}
+
+/// The asset `kind` (`hbar` or `usdc`) resolves to on `chain`.
+fn asset_for(kind: &str, chain: HederaChainReference) -> Result<AssetInfo, String> {
+    match kind.to_lowercase().as_str() {
+        "hbar" => Ok(AssetInfo {
+            id: "0.0.0".into(),
+            symbol: "HBAR".into(),
+            decimals: 8,
+        }),
+        "usdc" => {
+            let deployment =
+                USDC::on(chain).ok_or_else(|| "no USDC deployment for this network".to_owned())?;
+            Ok(AssetInfo {
+                id: deployment.address.to_string(),
+                symbol: "USDC".into(),
+                decimals: deployment.decimals,
+            })
+        }
+        other => Err(format!("asset must be hbar or usdc, got {other}")),
+    }
 }
 
 impl Config {
@@ -161,23 +203,9 @@ impl Config {
         };
 
         let asset_kind: String = get_from_env_unsafe("PAYMENT_ASSET").unwrap_or_else(|_| "hbar".into());
-        let asset = match asset_kind.to_lowercase().as_str() {
-            "hbar" => AssetInfo {
-                id: "0.0.0".into(),
-                symbol: "HBAR".into(),
-                decimals: 8,
-            },
-            "usdc" => {
-                let deployment = USDC::on(chain)
-                    .ok_or_else(|| "no USDC deployment for this network".to_owned())?;
-                AssetInfo {
-                    id: deployment.address.to_string(),
-                    symbol: "USDC".into(),
-                    decimals: deployment.decimals,
-                }
-            }
-            other => return Err(format!("PAYMENT_ASSET must be hbar or usdc, got {other}")),
-        };
+        let asset = asset_for(&asset_kind, chain).map_err(|e| format!("PAYMENT_ASSET: {e}"))?;
+        let tree_kind: String = get_from_env_unsafe("MANDATE_ASSET").unwrap_or_else(|_| "usdc".into());
+        let tree_asset = asset_for(&tree_kind, chain).map_err(|e| format!("MANDATE_ASSET: {e}"))?;
 
         let defaults = default_pricing(asset.decimals);
         let pricing = PriceModel {
@@ -186,6 +214,10 @@ impl Config {
                 .unwrap_or(defaults.per_1k_output),
             minimum: get_from_env_unsafe("MIN_PAYMENT").unwrap_or(defaults.minimum),
         };
+
+        let category: String = get_from_env_unsafe::<String>("SERVICE_CATEGORY")
+            .map(|c| c.trim().to_lowercase())
+            .unwrap_or_else(|_| "inference".into());
 
         let port: u16 = get_from_env_unsafe("PORT").unwrap_or(4021);
         let base_url: String = get_from_env_unsafe("BASE_URL")
@@ -237,6 +269,17 @@ impl Config {
             quote_ttl_secs: get_from_env_unsafe("QUOTE_TTL_SECS").unwrap_or(180),
             hcs,
             upstream,
+            description: get_from_env_unsafe("SERVICE_DESCRIPTION")
+                .unwrap_or_else(|_| describe(&category).to_owned()),
+            category,
+            tree_asset,
+            mirror_url: get_from_env_unsafe("MIRROR_URL").unwrap_or_else(|_| {
+                if matches!(chain, HederaChainReference::Mainnet) {
+                    "https://mainnet-public.mirrornode.hedera.com".into()
+                } else {
+                    "https://testnet.mirrornode.hedera.com".into()
+                }
+            }),
         })
     }
 

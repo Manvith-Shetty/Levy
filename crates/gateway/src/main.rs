@@ -17,6 +17,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use gateway::env::{Config, MandateMode};
 use gateway::hcs::{self, ReceiptHook, ReceiptLog};
+use gateway::ledger::SpendLedger;
 use gateway::mandate_guard::{self, AnyResolver};
 use gateway::quotes::QuoteStore;
 use gateway::routes::{self, AppState};
@@ -75,6 +76,20 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Register on the topic, so agents can discover this provider by
+    // replaying it. Once per start; the manifest stays the live source.
+    if let Some(tx) = &hcs_tx
+        && let Err(error) = tx.send(hcs::HcsMessage::Announce(hcs::announcement(&cfg)))
+    {
+        tracing::warn!(%error, "could not queue the service announcement");
+    }
+
+    let ledger = Arc::new(SpendLedger::new(
+        &cfg.mirror_url,
+        cfg.hcs.as_ref().map(|h| h.topic_id.clone()),
+        &cfg.tree_asset.id,
+    ));
+
     // Resource server: remote facilitator + the Hedera exact scheme, with the
     // receipt hook observing every settlement.
     let facilitator = FacilitatorClient::try_from(cfg.facilitator_url.as_str())
@@ -86,6 +101,7 @@ async fn main() -> Result<()> {
             Arc::clone(&quotes),
             Arc::clone(&receipts),
             hcs_tx.clone(),
+            Arc::clone(&ledger),
         ));
 
     let x402 = X402Middleware::from_resource_server(resource_server)
@@ -123,6 +139,7 @@ async fn main() -> Result<()> {
         hcs: hcs_tx,
         mandate,
         mandate_mock,
+        ledger,
     };
 
     // `.layer()` calls stack outermost-last, so the mandate guard — applied
@@ -133,6 +150,7 @@ async fn main() -> Result<()> {
         .route("/v1/quote", post(routes::quote))
         .route("/v1/receipts", get(routes::receipts))
         .route("/v1/refusals", get(routes::refusals))
+        .route("/v1/authorize", post(routes::authorize))
         .route(
             "/v1/infer",
             post(routes::infer).layer(paid_layer).layer(

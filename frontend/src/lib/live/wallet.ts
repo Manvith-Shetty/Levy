@@ -157,8 +157,9 @@ export type CreateStep = 'mint' | 'records'
 
 /**
  * Mints a child through the MandateRegistrar (which enforces budget ≤ parent
- * and expiry ≤ parent on-chain), then writes its four text records in one
- * resolver multicall. Two signatures, both simulated before the first one.
+ * and expiry ≤ parent on-chain), then writes its five policy records in one
+ * resolver multicall (budget, limits, services, asset). Two signatures, both
+ * simulated before the first one.
  */
 export async function createChild(spec: ChildSpec, onStep: (step: CreateStep) => void): Promise<Hash[]> {
   const owner = (await currentAccount()) ?? (await connect())
@@ -177,6 +178,8 @@ export async function createChild(spec: ChildSpec, onStep: (step: CreateStep) =>
         setText('maxPerCall', spec.maxPerCall.toString()),
         setText('ratePerMinute', spec.ratePerMinute.toString()),
         setText('allowedServices', spec.allowedServices.join(',')),
+        // The one asset the tree's budgets are denominated in.
+        setText('allowedAssets', config.assetTokenId),
       ],
     ],
   } as const

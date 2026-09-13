@@ -101,6 +101,42 @@ pub struct ServiceManifest {
     pub receipts_topic: Option<String>,
     /// x402 protocol version.
     pub x402_version: u8,
+    /// What kind of service this is (`inference`, `compute`, `data`) — the
+    /// value an agent's `allowedServices` record is checked against.
+    #[serde(default = "default_category")]
+    pub category: String,
+    /// One line describing what's sold.
+    #[serde(default)]
+    pub description: String,
+}
+
+fn default_category() -> String {
+    "inference".into()
+}
+
+/// A provider registering itself on the HCS topic, so agents can discover
+/// it by replaying the topic instead of being told where it is. Compact on
+/// purpose: one HCS message holds 1024 bytes before it has to be chunked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAnnouncement {
+    /// Schema marker, `leash.service.announce.v1`.
+    pub kind: String,
+    /// Provider name.
+    pub provider: String,
+    /// Service category, as in [`ServiceManifest::category`].
+    pub category: String,
+    /// Model or product served.
+    pub model: String,
+    /// Where the manifest lives: `<base_url>/.well-known/x402`.
+    pub base_url: String,
+    /// CAIP-2 network payments settle on.
+    pub network: String,
+    /// Symbol of the asset it's paid in.
+    pub asset: String,
+    /// Published price schedule, atomic units of that asset.
+    pub pricing: PriceModel,
+    /// RFC 3339 time of the announcement.
+    pub announced_at: String,
 }
 
 /// Body of `POST /v1/quote`.
@@ -214,6 +250,9 @@ pub struct Receipt {
     /// Empty when the mandate guard was not in the request path.
     #[serde(default)]
     pub mandate_path: Vec<MandateHop>,
+    /// Service category bought.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
 }
 
 /// One payment the mandate guard refused, before any price tag was issued.
@@ -239,8 +278,9 @@ pub struct Refusal {
     pub network: String,
     /// ENS subname of the ancestor that failed — may be the agent itself.
     pub blocked_by: String,
-    /// Machine-readable violation: `unresolvable`, `expired`, `over_budget`
-    /// or `over_per_call_limit`.
+    /// Machine-readable violation: `unresolvable`, `expired`, `over_budget`,
+    /// `insufficient_authority`, `over_per_call_limit`,
+    /// `service_not_permitted` or `asset_not_permitted`.
     pub violation: String,
     /// The ceiling that was breached, for `over_budget` and
     /// `over_per_call_limit`.
@@ -250,6 +290,9 @@ pub struct Refusal {
     pub reason: String,
     /// RFC 3339 timestamp the refusal was recorded.
     pub refused_at: String,
+    /// Service category the request was for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
 }
 
 #[cfg(test)]

@@ -7,11 +7,12 @@
  */
 
 import { config } from '../config'
-import type { Receipt, Refusal } from '../gateway/types'
+import type { Receipt, Refusal, ServiceAnnouncement } from '../gateway/types'
 
 export type TopicEntry =
   | { kind: 'receipt'; sequence: number; consensusAt: string; body: Receipt }
   | { kind: 'refusal'; sequence: number; consensusAt: string; body: Refusal }
+  | { kind: 'announce'; sequence: number; consensusAt: string; body: ServiceAnnouncement }
 
 interface MirrorMessage {
   consensus_timestamp: string
@@ -38,7 +39,7 @@ export function consensusToIso(timestamp: string): string {
 
 /**
  * Newest-first replay of the topic, up to `maxPages` × 100 messages.
- * Messages that aren't a receipt or refusal are skipped, not fatal.
+ * Receipts, refusals and service announcements; anything else is skipped.
  */
 export async function readTopic(topicId: string, maxPages = 5): Promise<TopicEntry[]> {
   const out: TopicEntry[] = []
@@ -58,6 +59,8 @@ export async function readTopic(topicId: string, maxPages = 5): Promise<TopicEnt
         out.push({ ...base, kind: 'receipt', body: body as Receipt })
       } else if (kind.startsWith('leash.mandate.refusal')) {
         out.push({ ...base, kind: 'refusal', body: body as Refusal })
+      } else if (kind.startsWith('leash.service.announce')) {
+        out.push({ ...base, kind: 'announce', body: body as ServiceAnnouncement })
       }
     }
     path = data.links?.next ?? null

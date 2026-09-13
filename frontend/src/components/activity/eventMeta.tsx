@@ -3,8 +3,8 @@ import type { AgentIndex } from '../../lib/selectors'
 import { amountIn } from '../../lib/utils'
 
 export const KIND_LABEL: Record<ActivityKind, string> = {
-  'payment.approved': 'Payment authorized',
-  'payment.blocked': 'Payment blocked',
+  'payment.approved': 'Payment settled',
+  'payment.blocked': 'Payment denied',
   'agent.created': 'Child agent created',
   'authority.delegated': 'Authority delegated',
   'agent.revoked': 'Agent revoked',
@@ -60,7 +60,7 @@ export function describeShort(event: ActivityEvent, index: AgentIndex): string {
     case 'payment.approved':
       return `${agent} paid ${eventAmount(event)}`
     case 'payment.blocked':
-      return `${agent} payment blocked`
+      return `${agent} payment denied`
     case 'agent.created':
       return `${agent} created child`
     case 'authority.delegated':

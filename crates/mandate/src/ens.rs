@@ -148,13 +148,13 @@ impl<P: Provider + Clone> MandateResolver for EnsResolver<P> {
 
         let leaf = labels[0];
         let reg = IRegistry::new(registry_addr, self.provider.clone());
-        // Expiry first: an expired leaf must report Expired even though its
-        // resolver reads back as zero (expired entries resolve to address(0)).
-        let leaf_expiry = reg
-            .getExpiry(labelhash(leaf))
-            .call()
-            .await
-            .map_err(|e| backend(ens_name, e))?;
+        // Expiry and resolver in one round trip. Expiry is judged first: an
+        // expired leaf must report Expired even though its resolver reads
+        // back as zero (expired entries resolve to address(0)).
+        let expiry_call = reg.getExpiry(labelhash(leaf));
+        let resolver_call = reg.getResolver(leaf.to_owned());
+        let (leaf_expiry, resolver_address) = tokio::join!(expiry_call.call(), resolver_call.call());
+        let leaf_expiry = leaf_expiry.map_err(|e| backend(ens_name, e))?;
         if leaf_expiry == 0 {
             return Err(MandateError::NotFound(ens_name.to_owned()));
         }
@@ -167,15 +167,10 @@ impl<P: Provider + Clone> MandateResolver for EnsResolver<P> {
             return Err(MandateError::AncestorExpired(ens_name.to_owned()));
         }
 
-        let resolver_address = reg
-            .getResolver(leaf.to_owned())
-            .call()
-            .await
-            .map_err(|e| backend(ens_name, e))?;
+        let resolver_address = resolver_address.map_err(|e| backend(ens_name, e))?;
         if resolver_address.is_zero() {
             return Err(MandateError::NotFound(ens_name.to_owned()));
         }
-        let expiry = leaf_expiry;
         let expires_at = leaf_expires_at;
 
         let node = namehash(ens_name);
@@ -191,29 +186,38 @@ impl<P: Provider + Clone> MandateResolver for EnsResolver<P> {
             }
         };
 
-        let budget: u64 = text("budget")
-            .await?
+        // Every record in one round trip.
+        let (budget, rate_per_minute, max_per_call, allowed_services, allowed_assets) = tokio::join!(
+            text("budget"),
+            text("ratePerMinute"),
+            text("maxPerCall"),
+            text("allowedServices"),
+            text("allowedAssets")
+        );
+        let budget: u64 = budget?
             .parse()
             .map_err(|e| backend(ens_name, anyhow::anyhow!("bad budget record: {e}")))?;
-        let rate_per_minute: u64 = text("ratePerMinute")
-            .await?
+        let rate_per_minute: u64 = rate_per_minute?
             .parse()
             .map_err(|e| backend(ens_name, anyhow::anyhow!("bad ratePerMinute record: {e}")))?;
-        let max_per_call: u64 = text("maxPerCall")
-            .await?
+        let max_per_call: u64 = max_per_call?
             .parse()
             .map_err(|e| backend(ens_name, anyhow::anyhow!("bad maxPerCall record: {e}")))?;
-        let allowed_services = text("allowedServices")
-            .await?
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
+        let list = |raw: String| -> Vec<String> {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        };
+        let allowed_services = list(allowed_services?);
+        // Optional: names minted before it existed simply don't have it.
+        let allowed_assets = list(allowed_assets.unwrap_or_default());
 
         Ok(MandateNode {
             budget,
             allowed_services,
+            allowed_assets,
             rate_per_minute,
             max_per_call,
             expires_at,

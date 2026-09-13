@@ -6,7 +6,6 @@ import { AppShell } from './app/AppShell'
 import { Overview } from './pages/Overview'
 import { Agents } from './pages/Agents'
 import { AgentDetail } from './pages/AgentDetail'
-import { Spending } from './pages/Spending'
 import { Activity } from './pages/Activity'
 import { Policies } from './pages/Policies'
 import { Services } from './pages/Services'
@@ -23,7 +22,8 @@ export default function App() {
                 <Route index element={<Overview />} />
                 <Route path="agents" element={<Agents />} />
                 <Route path="agents/:id" element={<AgentDetail />} />
-                <Route path="spending" element={<Spending />} />
+                {/* Spending lives on Overview and each agent's page now. */}
+                <Route path="spending" element={<Navigate to="/" replace />} />
                 <Route path="activity" element={<Activity />} />
                 <Route path="policies" element={<Policies />} />
                 <Route path="services" element={<Services />} />

@@ -5,6 +5,7 @@
 pub mod env;
 pub mod hcs;
 pub mod inference;
+pub mod ledger;
 pub mod mandate_guard;
 pub mod quotes;
 pub mod routes;

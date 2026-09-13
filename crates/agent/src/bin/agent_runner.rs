@@ -11,16 +11,22 @@
 //! cargo run -p agent --bin agent-runner
 //! ```
 //!
+//! Providers are discovered from the HCS topic, where every gateway announces
+//! itself on start, plus any listed in `PROVIDERS`. Before paying, the runner
+//! asks each candidate's policy engine (`POST /v1/authorize`) whether the
+//! agent may buy there, and only the cheapest authorized quote is paid.
+//!
 //! Endpoints:
 //! - `GET  /v1/runner`    — payer, providers and the per-run ceiling.
-//! - `GET  /v1/providers` — every provider's manifest (discovery).
-//! - `POST /v1/run`       — `{ agent, prompt?, max_output_tokens?, budget_atomic? }`,
+//! - `GET  /v1/providers` — every discovered provider and its manifest.
+//! - `POST /v1/run`       — `{ agent, service?, prompt?, max_output_tokens?, budget_atomic? }`,
 //!   answered with `text/event-stream`.
 //!
 //! It spends real money from the shared wallet, so it runs one request at a
 //! time, caps every run at `RUNNER_MAX_ATOMIC`, and — when `RUNNER_TOKEN` is
 //! set — only answers callers that send it as a bearer token.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +39,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use common::utils::get_from_env_unsafe;
 use meter::{QuoteRequest, ServiceManifest};
 use serde::Deserialize;
@@ -45,10 +52,16 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 const MIN_GAP: Duration = Duration::from_secs(2);
 const MAX_PROMPT_CHARS: usize = 2_000;
 const DEFAULT_PROMPT: &str = "Explain Hedera's hashgraph consensus in three sentences.";
+/// How long to wait for a settlement's receipt to reach consensus on HCS.
+const AUDIT_WAIT: Duration = Duration::from_secs(30);
 
 struct Runner {
     wallet: Wallet,
+    /// Always shopped, on top of whatever the topic announces.
     providers: Vec<String>,
+    mirror_url: String,
+    /// Topic to discover providers on and confirm receipts against.
+    topic_id: Option<String>,
     max_atomic: u64,
     max_output_tokens: u64,
     token: Option<String>,
@@ -59,6 +72,7 @@ struct Runner {
 #[derive(Deserialize)]
 struct RunRequest {
     agent: String,
+    service: Option<String>,
     prompt: Option<String>,
     max_output_tokens: Option<u64>,
     budget_atomic: Option<u64>,
@@ -88,6 +102,11 @@ async fn main() -> Result<()> {
             .map(|s| s.trim().trim_end_matches('/').to_owned())
             .filter(|s| !s.is_empty())
             .collect(),
+        mirror_url: get_from_env_unsafe::<String>("MIRROR_URL")
+            .unwrap_or_else(|_| "https://testnet.mirrornode.hedera.com".into())
+            .trim_end_matches('/')
+            .to_owned(),
+        topic_id: get_from_env_unsafe::<String>("HCS_TOPIC_ID").ok().filter(|t| !t.is_empty()),
         max_atomic: get_from_env_unsafe("RUNNER_MAX_ATOMIC").unwrap_or(10_000),
         max_output_tokens: get_from_env_unsafe("MAX_OUTPUT_TOKENS").unwrap_or(128),
         token: get_from_env_unsafe::<String>("RUNNER_TOKEN")
@@ -153,6 +172,7 @@ async fn info(State(runner): State<Arc<Runner>>) -> Json<Value> {
     Json(json!({
         "payer": runner.wallet.account_id.to_string(),
         "providers": runner.providers,
+        "topic": runner.topic_id,
         "max_atomic": runner.max_atomic,
         "max_output_tokens": runner.max_output_tokens,
         "requires_token": runner.token.is_some(),
@@ -160,25 +180,160 @@ async fn info(State(runner): State<Arc<Runner>>) -> Json<Value> {
 }
 
 async fn providers_route(State(runner): State<Arc<Runner>>) -> Json<Value> {
-    let http = reqwest::Client::new();
-    let mut found = Vec::new();
-    for base in &runner.providers {
-        let manifest = async {
-            http.get(format!("{base}/.well-known/x402"))
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<ServiceManifest>()
-                .await
+    let found = discover(&runner).await;
+    Json(json!({ "providers": found.iter().map(Discovered::to_json).collect::<Vec<_>>() }))
+}
+
+/// One provider as discovery found it.
+struct Discovered {
+    base_url: String,
+    /// `hcs` when it announced itself on the topic, `configured` when it's
+    /// only in `PROVIDERS`.
+    source: &'static str,
+    manifest: Result<ServiceManifest, String>,
+}
+
+impl Discovered {
+    fn to_json(&self) -> Value {
+        match &self.manifest {
+            Ok(manifest) => json!({ "base_url": self.base_url, "source": self.source, "manifest": manifest }),
+            Err(error) => json!({ "base_url": self.base_url, "source": self.source, "error": error }),
         }
-        .await;
-        found.push(match manifest {
-            Ok(manifest) => json!({ "base_url": base, "manifest": manifest }),
-            Err(error) => json!({ "base_url": base, "error": error.to_string() }),
-        });
     }
-    Json(json!({ "providers": found }))
+}
+
+#[derive(Deserialize)]
+struct MirrorPage {
+    messages: Vec<MirrorMessage>,
+}
+
+#[derive(Deserialize)]
+struct MirrorMessage {
+    sequence_number: u64,
+    consensus_timestamp: String,
+    message: String,
+}
+
+/// The newest `limit` messages on the topic, decoded, newest first.
+async fn topic_messages(runner: &Runner, topic: &str, limit: u32) -> Result<Vec<(MirrorMessage, Value)>> {
+    let url = format!(
+        "{}/api/v1/topics/{topic}/messages?limit={limit}&order=desc",
+        runner.mirror_url
+    );
+    let page: MirrorPage = reqwest::Client::new()
+        .get(url)
+        .timeout(Duration::from_secs(6))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(page
+        .messages
+        .into_iter()
+        .filter_map(|m| {
+            let bytes = BASE64_STANDARD.decode(&m.message).ok()?;
+            let value = serde_json::from_slice::<Value>(&bytes).ok()?;
+            Some((m, value))
+        })
+        .collect())
+}
+
+/// Providers announced on the topic plus the configured ones, each with its
+/// live manifest (or why it didn't answer).
+async fn discover(runner: &Runner) -> Vec<Discovered> {
+    let http = reqwest::Client::new();
+    let fetch = |base: String| {
+        let http = http.clone();
+        async move {
+            let manifest = async {
+                http.get(format!("{base}/.well-known/x402"))
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<ServiceManifest>()
+                    .await
+            }
+            .await
+            .map_err(|e| e.to_string());
+            (base, manifest)
+        }
+    };
+
+    let mut found: BTreeMap<String, Discovered> = BTreeMap::new();
+    for base in &runner.providers {
+        let (base, manifest) = fetch(base.clone()).await;
+        found.insert(base.clone(), Discovered { base_url: base, source: "configured", manifest });
+    }
+
+    // The registry topic: configured, or whatever the providers publish to.
+    let topic = runner.topic_id.clone().or_else(|| {
+        found
+            .values()
+            .find_map(|d| d.manifest.as_ref().ok().and_then(|m| m.receipts_topic.clone()))
+    });
+    if let Some(topic) = topic {
+        match topic_messages(runner, &topic, 100).await {
+            Ok(messages) => {
+                for (_, value) in messages {
+                    if value.get("kind").and_then(Value::as_str) != Some("leash.service.announce.v1") {
+                        continue;
+                    }
+                    let Some(base) = value.get("base_url").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let base = base.trim_end_matches('/').to_owned();
+                    if let Some(known) = found.get_mut(&base) {
+                        known.source = "hcs";
+                    } else {
+                        let (base, manifest) = fetch(base).await;
+                        found.insert(base.clone(), Discovered { base_url: base, source: "hcs", manifest });
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "could not read announcements from the topic"),
+        }
+    }
+    found.into_values().collect()
+}
+
+/// Asks `offer`'s gateway whether `agent` may pay it. Dry run: nothing is
+/// recorded or reserved.
+async fn authorize(offer: &Offer, agent: &str) -> Result<Value> {
+    let base = offer.manifest.base_url.trim_end_matches('/');
+    let response = reqwest::Client::new()
+        .post(format!("{base}/v1/authorize"))
+        .timeout(Duration::from_secs(20))
+        .json(&json!({ "agent": agent, "amount": offer.quote.amount }))
+        .send()
+        .await?;
+    let status = response.status();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    anyhow::ensure!(status.is_success(), "authorize answered {status}: {body}");
+    Ok(body)
+}
+
+/// Waits for the settlement's receipt to appear on the topic.
+async fn await_receipt(runner: &Runner, topic: &str, transaction: &str) -> Option<(u64, String)> {
+    let norm = |id: &str| id.replacen('@', "-", 1).replace('.', "-");
+    let wanted = norm(transaction);
+    let started = Instant::now();
+    while started.elapsed() < AUDIT_WAIT {
+        if let Ok(messages) = topic_messages(runner, topic, 25).await {
+            for (message, value) in messages {
+                if value
+                    .get("transaction_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|tx| norm(tx) == wanted)
+                {
+                    return Some((message.sequence_number, message.consensus_timestamp));
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    None
 }
 
 async fn run(
@@ -193,6 +348,11 @@ async fn run(
     if !valid_agent_name(&agent) {
         return refuse(StatusCode::BAD_REQUEST, "agent must be an ENS name like sub.agent.root");
     }
+    let service = request
+        .service
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "inference".to_owned());
     let prompt = request
         .prompt
         .map(|p| p.trim().to_owned())
@@ -224,7 +384,7 @@ async fn run(
         let emit = |value: Value| {
             let _ = tx.send(value);
         };
-        if let Err(error) = purchase(&task_runner, &agent, &prompt, max_output_tokens, budget, &emit).await {
+        if let Err(error) = purchase(&task_runner, &agent, &service, &prompt, max_output_tokens, budget, &emit).await {
             emit(json!({ "step": "error", "message": format!("{error:#}") }));
         }
         emit(json!({ "step": "done", "elapsed_ms": started.elapsed().as_millis() as u64 }));
@@ -236,10 +396,12 @@ async fn run(
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
-/// One purchase, narrated through `emit`. Mirrors `bin/agent.rs`.
+/// One purchase, narrated through `emit`: discover, quote, authorize, pay,
+/// execute, audit. Mirrors `bin/agent.rs`, plus the policy check up front.
 async fn purchase(
     runner: &Runner,
     agent: &str,
+    service: &str,
     prompt: &str,
     max_output_tokens: u64,
     budget: u64,
@@ -249,26 +411,44 @@ async fn purchase(
     emit(json!({
         "step": "start",
         "agent": agent,
+        "service": service,
         "payer": runner.wallet.account_id.to_string(),
         "prompt": prompt,
         "budget_atomic": budget,
         "max_output_tokens": max_output_tokens,
     }));
 
-    // 1. Discovery and pricing, every provider.
+    // 1. Discover: every provider on the topic or in PROVIDERS, then only
+    //    the ones selling this service.
+    let found = discover(runner).await;
+    emit(json!({
+        "step": "discovered",
+        "providers": found.iter().map(Discovered::to_json).collect::<Vec<_>>(),
+    }));
+    let matching: Vec<&Discovered> = found
+        .iter()
+        .filter(|d| d.manifest.as_ref().is_ok_and(|m| m.category.eq_ignore_ascii_case(service)))
+        .collect();
+    if matching.is_empty() {
+        emit(json!({ "step": "no_provider", "service": service }));
+        return Ok(());
+    }
+
+    // 2. Quote: price this prompt with each.
     let request = QuoteRequest {
         prompt: prompt.to_owned(),
         max_output_tokens,
     };
     let mut offers: Vec<Offer> = Vec::new();
-    for base in &runner.providers {
-        match client.quote(base, &request).await {
+    for provider in matching {
+        match client.quote(&provider.base_url, &request).await {
             Ok(offer) => {
                 emit(json!({
                     "step": "quote",
-                    "base_url": base,
+                    "base_url": provider.base_url,
                     "provider": offer.manifest.provider,
                     "model": offer.manifest.model,
+                    "category": offer.manifest.category,
                     "pricing": offer.manifest.pricing,
                     "input_tokens": offer.quote.input_tokens,
                     "max_output_tokens": offer.quote.max_output_tokens,
@@ -277,31 +457,63 @@ async fn purchase(
                     "network": offer.quote.network,
                     "pay_to": offer.manifest.pay_to,
                     "facilitator": offer.manifest.facilitator,
+                    "quote_id": offer.quote.quote_id,
                 }));
                 offers.push(offer);
             }
             Err(error) => emit(json!({
                 "step": "quote_failed",
-                "base_url": base,
+                "base_url": provider.base_url,
                 "message": format!("{error:#}"),
             })),
         }
     }
-    anyhow::ensure!(!offers.is_empty(), "no provider answered");
-
-    // 2. Selection: the cheapest quote the budget covers.
-    let cheapest = offers.iter().map(|o| o.quote.amount).min().unwrap_or(0);
-    let Some(chosen) = offers
-        .iter()
-        .filter(|o| o.quote.amount <= budget)
-        .min_by_key(|o| o.quote.amount)
-    else {
+    if offers.is_empty() {
+        emit(json!({ "step": "no_provider", "service": service, "unavailable": true }));
+        return Ok(());
+    }
+    offers.sort_by_key(|o| o.quote.amount);
+    let cheapest = offers[0].quote.amount;
+    let affordable: Vec<&Offer> = offers.iter().filter(|o| o.quote.amount <= budget).collect();
+    if affordable.is_empty() {
         emit(json!({
             "step": "over_budget",
             "budget_atomic": budget,
             "cheapest": cheapest,
             "asset": offers[0].quote.asset,
         }));
+        return Ok(());
+    }
+
+    // 3. Authorize: Leash's policy engine decides, per provider, cheapest
+    //    first. The first approved quote is the one paid.
+    let mut chosen: Option<&Offer> = None;
+    let mut first_denial: Option<Value> = None;
+    for offer in affordable {
+        match authorize(offer, agent).await {
+            Ok(decision) => {
+                let approved = decision.get("approved").and_then(Value::as_bool).unwrap_or(false);
+                emit(json!({
+                    "step": "authorization",
+                    "provider": offer.manifest.provider,
+                    "quote_id": offer.quote.quote_id,
+                    "decision": decision,
+                }));
+                if approved {
+                    chosen = Some(offer);
+                    break;
+                }
+                first_denial.get_or_insert(decision);
+            }
+            Err(error) => emit(json!({
+                "step": "authorization_failed",
+                "provider": offer.manifest.provider,
+                "message": format!("{error:#}"),
+            })),
+        }
+    }
+    let Some(chosen) = chosen else {
+        emit(json!({ "step": "denied", "decision": first_denial }));
         return Ok(());
     };
     emit(json!({
@@ -313,7 +525,8 @@ async fn purchase(
         "quote_id": chosen.quote.quote_id,
     }));
 
-    // 3. Ask without paying: the mandate guard answers first, then x402.
+    // 4. Pay: the gated endpoint re-checks the mandate and names its price
+    //    (402), then the signed transfer settles through the facilitator.
     match client.challenge(chosen, agent).await? {
         Challenge::MandateRejected { reason } => {
             emit(json!({ "step": "refused", "reason": reason }));
@@ -323,35 +536,57 @@ async fn purchase(
             emit(json!({ "step": "payment_required", "requirements": requirements }));
         }
     }
-
-    // 4. Sign the transfer, let the facilitator settle it, get served.
     emit(json!({ "step": "paying", "payer": runner.wallet.account_id.to_string() }));
-    match client.purchase(chosen, agent, budget).await? {
+    let outcome = match client.purchase(chosen, agent, budget).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            emit(json!({ "step": "payment_failed", "message": format!("{error:#}") }));
+            return Ok(());
+        }
+    };
+
+    // 5. Execute and return the result.
+    let (result, settlement) = match outcome {
         PurchaseOutcome::MandateRejected { reason } => {
             emit(json!({ "step": "refused", "reason": reason }));
+            return Ok(());
         }
-        PurchaseOutcome::Approved { result, settlement } => {
-            if let Some(s) = &settlement {
-                emit(json!({
-                    "step": "settled",
-                    "transaction": s.transaction,
-                    "network": s.network,
-                    "payer": s.payer,
-                    "explorer": hashscan_tx(&s.network, &s.transaction),
-                }));
-            }
-            emit(json!({
-                "step": "result",
-                "provider": result.provider,
-                "model": result.model,
-                "completion": result.completion,
-                "usage": result.usage,
-                "charged": result.charged,
-                "unused_output_credit": result.unused_output_credit,
-                "asset": chosen.quote.asset,
-                "quote_id": result.quote_id,
-            }));
-        }
+        PurchaseOutcome::Approved { result, settlement } => (result, settlement),
+    };
+    if let Some(s) = &settlement {
+        emit(json!({
+            "step": "settled",
+            "transaction": s.transaction,
+            "network": s.network,
+            "payer": s.payer,
+            "explorer": hashscan_tx(&s.network, &s.transaction),
+        }));
+    }
+    emit(json!({
+        "step": "result",
+        "provider": result.provider,
+        "model": result.model,
+        "completion": result.completion,
+        "usage": result.usage,
+        "charged": result.charged,
+        "unused_output_credit": result.unused_output_credit,
+        "asset": chosen.quote.asset,
+        "quote_id": result.quote_id,
+    }));
+
+    // 6. Audit: the receipt reaching consensus on the topic.
+    let topic = chosen.manifest.receipts_topic.clone().or_else(|| runner.topic_id.clone());
+    match (topic, settlement) {
+        (Some(topic), Some(s)) => match await_receipt(runner, &topic, &s.transaction).await {
+            Some((sequence, consensus)) => emit(json!({
+                "step": "audited",
+                "topic": topic,
+                "sequence": sequence,
+                "consensus_timestamp": consensus,
+            })),
+            None => emit(json!({ "step": "audit_pending", "topic": topic })),
+        },
+        _ => emit(json!({ "step": "audit_pending", "topic": Value::Null })),
     }
     Ok(())
 }

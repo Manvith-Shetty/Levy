@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use hedera::{AccountId, Client, PrivateKey, TopicId, TopicMessageSubmitTransaction};
-use meter::{Receipt, Refusal, Usage};
+use meter::{Receipt, Refusal, ServiceAnnouncement, Usage};
 use r402_protocol::payment::SettleResponse;
 use r402_server::{ResourceServerHooks, SettleResultContext};
 use tokio::sync::mpsc;
 
 use crate::env::{Config, HcsConfig};
+use crate::ledger::SpendLedger;
 use crate::quotes::QuoteStore;
 
 /// Parses a Hedera private key in any of the formats the portal and SDKs emit.
@@ -122,6 +123,8 @@ pub enum HcsMessage {
     Receipt(Receipt),
     /// A payment the mandate guard refused.
     Refusal(Refusal),
+    /// This provider registering itself for discovery.
+    Announce(ServiceAnnouncement),
 }
 
 impl HcsMessage {
@@ -129,6 +132,7 @@ impl HcsMessage {
         match self {
             Self::Receipt(receipt) => serde_json::to_vec(receipt),
             Self::Refusal(refusal) => serde_json::to_vec(refusal),
+            Self::Announce(announcement) => serde_json::to_vec(announcement),
         }
     }
 
@@ -136,6 +140,7 @@ impl HcsMessage {
         match self {
             Self::Receipt(receipt) => &receipt.quote_id,
             Self::Refusal(refusal) => &refusal.quote_id,
+            Self::Announce(announcement) => &announcement.provider,
         }
     }
 
@@ -143,6 +148,7 @@ impl HcsMessage {
         match self {
             Self::Receipt(_) => "receipt",
             Self::Refusal(_) => "refusal",
+            Self::Announce(_) => "announcement",
         }
     }
 }
@@ -192,10 +198,28 @@ pub fn spawn_publisher(
     Ok(tx)
 }
 
+/// This provider's registration, as published to the topic.
+#[must_use]
+pub fn announcement(cfg: &Config) -> ServiceAnnouncement {
+    ServiceAnnouncement {
+        kind: "leash.service.announce.v1".into(),
+        provider: cfg.provider.clone(),
+        category: cfg.category.clone(),
+        model: cfg.model.clone(),
+        base_url: cfg.base_url.to_string().trim_end_matches('/').to_owned(),
+        network: cfg.network.clone(),
+        asset: cfg.asset.symbol.clone(),
+        pricing: cfg.pricing,
+        announced_at: now_rfc3339(),
+    }
+}
+
 /// Resource-server hook that turns each successful settlement into a receipt.
 pub struct ReceiptHook {
     provider: String,
     pay_to: String,
+    category: String,
+    ledger: Arc<SpendLedger>,
     quotes: Arc<QuoteStore>,
     log: Arc<ReceiptLog>,
     hcs: Option<mpsc::UnboundedSender<HcsMessage>>,
@@ -209,10 +233,13 @@ impl ReceiptHook {
         quotes: Arc<QuoteStore>,
         log: Arc<ReceiptLog>,
         hcs: Option<mpsc::UnboundedSender<HcsMessage>>,
+        ledger: Arc<SpendLedger>,
     ) -> Self {
         Self {
             provider: cfg.provider.clone(),
             pay_to: cfg.pay_to.clone(),
+            category: cfg.category.clone(),
+            ledger,
             quotes,
             log,
             hcs,
@@ -270,7 +297,9 @@ impl ResourceServerHooks for ReceiptHook {
                 usage,
                 settled_at: now_rfc3339(),
                 mandate_path,
+                service: Some(self.category.clone()),
             };
+            self.ledger.record(&receipt).await;
 
             tracing::info!(
                 payer = %receipt.payer,

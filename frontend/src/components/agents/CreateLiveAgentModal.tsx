@@ -4,6 +4,7 @@ import { useToast } from '../../app/toast'
 import { treeAsset, toAtomic } from '../../lib/live/adapter'
 import { explain, toLabel, type CreateStep } from '../../lib/live/wallet'
 import { useLeash } from '../../lib/store'
+import { config } from '../../lib/config'
 import { cx, formatDate, money, ratio } from '../../lib/utils'
 import { Button } from '../common/Button'
 import { Checkbox, Label, MoneyInput, Select, TextInput } from '../common/Field'
@@ -53,7 +54,16 @@ export function CreateLiveAgentModal({
   const label = toLabel(name)
   const fullName = label && parent ? `${label}.${parent.name}` : ''
   const taken = Boolean(fullName && index[fullName])
-  const ceiling = parent?.authority ?? 0
+  // Parent available ≥ total child authority: what's already delegated to
+  // live children comes off the top. (The registrar checks each child against
+  // the parent's budget on its own; the sum is kept here.)
+  const delegatedAlready = parent
+    ? parent.children
+        .map((id) => index[id])
+        .filter((c) => c && c.status !== 'revoked' && c.status !== 'expired')
+        .reduce((sum, c) => sum + c.authority, 0)
+    : 0
+  const ceiling = Math.max(0, Math.round(((parent?.authority ?? 0) - delegatedAlready) * 1e6) / 1e6)
   const over = typeof budget === 'number' && budget > ceiling
   const parentExpiry = parent?.expiresAt ? new Date(parent.expiresAt) : undefined
   const defaultExpiry = parentExpiry ? parentExpiry.toISOString().slice(0, 10) : ''
@@ -177,7 +187,7 @@ export function CreateLiveAgentModal({
               <Select id="live-parent" value={parentName} onChange={(e) => setParentName(e.target.value)}>
                 {parents.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.name} — up to {money(a.authority)} per child
+                    {a.name} — {money(a.authority)} budget
                   </option>
                 ))}
               </Select>
@@ -220,7 +230,9 @@ export function CreateLiveAgentModal({
             <div className="rounded-lg border border-line bg-sunken p-4">
               <div className="flex items-baseline justify-between">
                 <p className="text-[13px] font-medium text-ink">{parent.name}</p>
-                <p className="numeric text-[13px] text-muted">{money(parent.authority)} budget</p>
+                <p className="numeric text-[13px] text-muted">
+                  {money(ceiling)} of {money(parent.authority)} still undelegated
+                </p>
               </div>
               <div className="mt-3 flex h-3 w-full overflow-hidden rounded bg-[#191c22]">
                 <div
@@ -237,7 +249,7 @@ export function CreateLiveAgentModal({
                       <dd className="text-ink">{money(budget as number)}</dd>
                     </div>
                     <div className="flex justify-between gap-4">
-                      <dt className="text-muted">{parent.name}'s budget</dt>
+                      <dt className="text-muted">{parent.name} can still delegate</dt>
                       <dd className="text-ink">{money(ceiling)}</dd>
                     </div>
                   </dl>
@@ -245,8 +257,8 @@ export function CreateLiveAgentModal({
               ) : (
                 <p className="copy mt-3.5 flex gap-2 rounded-md border border-warn/30 bg-warn/[0.06] px-3 py-2.5 text-[12.5px] text-warn">
                   <span aria-hidden>⚠</span>
-                  The MandateRegistrar rejects any child whose budget is above {money(ceiling)} — checked
-                  on-chain against {parent.name}'s live record.
+                  {parent.name} has {money(ceiling)} left to delegate after its other children. The
+                  MandateRegistrar also checks, on-chain, that no child exceeds {parent.name}'s own budget.
                 </p>
               )}
             </div>
@@ -320,6 +332,7 @@ export function CreateLiveAgentModal({
                     ['Budget', money(typeof budget === 'number' ? budget : 0)],
                     ['Max per call', money(perCall)],
                     ['Services', services.join(', ')],
+                    ['Asset', config.assetSymbol],
                     ['Expires', Number.isFinite(expiryMs) ? formatDate(new Date(expiryMs).toISOString()) : '—'],
                     ['Owner', live.account ? `${live.account.slice(0, 6)}…${live.account.slice(-4)}` : 'Your connected wallet'],
                   ] as const
@@ -334,7 +347,7 @@ export function CreateLiveAgentModal({
                 {(
                   [
                     ['mint', 'MandateRegistrar.registerChild — mints the name, checks budget and expiry'],
-                    ['records', 'Resolver multicall — writes the four text records'],
+                    ['records', 'Resolver multicall: writes the five policy records'],
                   ] as const
                 ).map(([key, text], i) => (
                   <li

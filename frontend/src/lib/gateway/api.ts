@@ -1,4 +1,5 @@
 import type {
+  PolicyDecision,
   Receipt,
   Refusal,
   RevokeMandateRequest,
@@ -49,6 +50,20 @@ export function getReceipts(): Promise<Receipt[]> {
 
 export function getRefusals(): Promise<Refusal[]> {
   return fetch(`${BASE}/v1/refusals`).then(json<Refusal[]>)
+}
+
+/** Runs the gateway's policy engine without paying, recording or reserving anything. */
+export function authorize(body: {
+  agent: string
+  amount: number
+  service?: string
+  asset?: string
+}): Promise<PolicyDecision> {
+  return fetch(`${BASE}/v1/authorize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(json<PolicyDecision>)
 }
 
 export function seedMandate(body: SeedMandateRequest): Promise<{ seeded: string }> {

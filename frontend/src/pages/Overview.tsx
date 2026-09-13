@@ -1,15 +1,19 @@
 import { useMemo, useState } from 'react'
 import { useLeash } from '../lib/store'
 import { useUI } from '../app/ui'
-import { portfolioTotals, rootAgents } from '../lib/selectors'
-import { money, moneyExact, percent } from '../lib/utils'
+import { dailySpend, portfolioTotals, rootAgents, spendByAgent } from '../lib/selectors'
+import type { ActivityEvent } from '../lib/types'
+import { cx, formatTime, money, moneyExact, percent } from '../lib/utils'
 import { PageHeader } from '../components/layout/PageHeader'
 import { config } from '../lib/config'
 import { Button } from '../components/common/Button'
-import { Card } from '../components/common/Card'
+import { Card, CardHead } from '../components/common/Card'
 import { Kpi } from '../components/common/Kpi'
 import { AgentTree } from '../components/agents/AgentTree'
 import { LiveActivity, LiveBadge } from '../components/activity/LiveActivity'
+import { eventAmount } from '../components/activity/eventMeta'
+import { SpendingChart } from '../components/spending/SpendingChart'
+import { SpendingByAgent } from '../components/spending/SpendingByAgent'
 import { IconPlus } from '../components/layout/icons'
 import { Skeleton, SkeletonKpis } from '../components/common/Skeleton'
 import { LiveNotice } from '../components/layout/LiveNotice'
@@ -24,12 +28,19 @@ export function Overview() {
 
   const totals = useMemo(() => portfolioTotals(agents, events), [agents, events])
   const roots = rootAgents(agents)
+  const points = useMemo(() => dailySpend(events, 14), [events])
+  const byAgent = useMemo(() => spendByAgent(agents), [agents])
+  const payments = useMemo(() => events.filter((e) => e.kind === 'payment.approved'), [events])
+  const decisions = useMemo(
+    () => events.filter((e) => e.kind === 'payment.approved' || e.kind === 'payment.blocked'),
+    [events],
+  )
 
   return (
     <>
       <PageHeader
         title="Overview"
-        subtitle="Monitor your agent spending authority and infrastructure activity."
+        subtitle="How much authority you've delegated, what your agents are buying, and what Leash stopped."
         action={
           <div className="flex flex-wrap gap-2">
             {live.active && config.runnerEnabled && (
@@ -48,27 +59,17 @@ export function Overview() {
       {!ready ? (
         <SkeletonKpis />
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Kpi
-            label="Total authority"
-            value={money(totals.authority)}
-            footnote={`Across ${agents.length} agents`}
-          />
-          <Kpi
-            label="Total spent"
-            value={moneyExact(totals.spent)}
-            footnote={`${percent(totals.utilization)} of authority`}
-          />
-          <Kpi
-            label="Active agents"
-            value={totals.activeAgents}
-            footnote={`${totals.delegatedAgents} delegated`}
-          />
+        <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
+          <Kpi label="Total authority" value={money(totals.authority)} footnote={`Held by ${roots.length} root${roots.length === 1 ? '' : 's'}`} />
+          <Kpi label="Delegated" value={money(totals.delegated)} footnote={`${percent(totals.authority ? totals.delegated / totals.authority : 0)} handed to agents`} />
+          <Kpi label="Spent" value={moneyExact(totals.spent)} footnote={`${percent(totals.utilization)} of authority`} />
+          <Kpi label="Remaining" value={money(totals.remaining)} tone="text-authority" footnote="Still spendable" />
+          <Kpi label="Active agents" value={totals.activeAgents} footnote={`${totals.delegatedAgents} delegating further`} />
           <Kpi
             label="Blocked requests"
             value={totals.blocked}
             tone="text-blocked"
-            footnote={`↑ ${totals.blockedThisWeek} this week`}
+            footnote={`${totals.blockedThisWeek} this week`}
           />
         </div>
       )}
@@ -109,16 +110,96 @@ export function Overview() {
         </div>
       </Card>
 
-      <Card padded={false} className="mt-4">
-        <div className="flex items-center justify-between border-b border-hairline px-5 py-3.5">
-          <h2 className="text-[13px] font-semibold tracking-normal text-ink">Live activity</h2>
-          <LiveBadge />
-        </div>
-        <div className="px-3 py-2">
-          <LiveActivity events={events} onSelect={ui.openEvent} />
-        </div>
-      </Card>
+      <div className="mt-4 grid items-start gap-4 xl:grid-cols-2">
+        <Card padded={false}>
+          <div className="flex items-center justify-between border-b border-hairline px-5 py-3.5">
+            <h2 className="text-[13px] font-semibold tracking-normal text-ink">Recent payments</h2>
+            {live.active && <LiveBadge />}
+          </div>
+          <div className="px-3 py-2">
+            {payments.length === 0 ? (
+              <p className="copy px-2 py-6 text-[13px] text-muted">
+                No payments yet. {live.active ? 'Run a paid request to make the first one.' : ''}
+              </p>
+            ) : (
+              <LiveActivity events={payments} onSelect={ui.openEvent} limit={6} columns={false} />
+            )}
+          </div>
+        </Card>
+        <Card padded={false}>
+          <div className="flex items-center justify-between border-b border-hairline px-5 py-3.5">
+            <h2 className="text-[13px] font-semibold tracking-normal text-ink">Policy decisions</h2>
+            <span className="text-[11.5px] text-faint">Every payment is checked first</span>
+          </div>
+          <div className="px-3 py-2">
+            {decisions.length === 0 ? (
+              <p className="copy px-2 py-6 text-[13px] text-muted">No payment has been attempted yet.</p>
+            ) : (
+              <DecisionList events={decisions.slice(0, 6)} onSelect={ui.openEvent} />
+            )}
+          </div>
+        </Card>
+      </div>
+
+      <div className="mt-4 grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <Card>
+          <CardHead title="Spend over time" />
+          <div className="mt-5">
+            <SpendingChart points={points} height={220} />
+          </div>
+        </Card>
+        <Card>
+          <CardHead title="Spending by agent" hint="Each agent's total includes everything under it." />
+          <div className="mt-5">
+            <SpendingByAgent rows={byAgent} total={totals.spent} />
+          </div>
+        </Card>
+      </div>
     </>
+  )
+}
+
+/** Approved and denied payments, each with the rule that decided it. */
+function DecisionList({ events, onSelect }: { events: ActivityEvent[]; onSelect: (e: ActivityEvent) => void }) {
+  return (
+    <ul>
+      {events.map((event) => {
+        const approved = event.kind === 'payment.approved'
+        return (
+          <li key={event.id}>
+            <button
+              type="button"
+              onClick={() => onSelect(event)}
+              className="wash press flex w-full items-start gap-3 rounded-md px-2 py-2 text-left focus-visible:outline-2 focus-visible:outline-authority/60"
+            >
+              <span className="numeric w-10 shrink-0 pt-px text-[12px] text-faint">{formatTime(event.timestamp)}</span>
+              <span
+                className={cx(
+                  'shrink-0 rounded px-1.5 py-px text-[11px] font-medium',
+                  approved ? 'bg-authority/12 text-authority' : 'bg-blocked/12 text-blocked',
+                )}
+              >
+                {approved ? 'Approved' : 'Denied'}
+              </span>
+              <span className="min-w-0 flex-1 text-[13px]">
+                <span className="text-ink">{event.agentId}</span>
+                <span className="text-muted">
+                  {' '}
+                  · {eventAmount(event)}
+                  {event.service ? ` · ${event.service}` : ''}
+                </span>
+                {!approved && event.reason && (
+                  <span className="mt-0.5 block truncate text-[12px] text-blocked/90">
+                    {event.reason}
+                    {event.blockedBy && event.blockedBy !== event.agentId ? ` (${event.blockedBy})` : ''}
+                  </span>
+                )}
+              </span>
+            </button>
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 

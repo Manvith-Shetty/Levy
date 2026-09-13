@@ -9,6 +9,7 @@ import { Pill } from '../components/common/Badge'
 import { IconPlus } from '../components/layout/icons'
 import { useToast } from '../app/toast'
 import { etherscanUrl } from '../lib/config'
+import { PolicySimulator } from '../components/policy/PolicySimulator'
 
 export function Policies() {
   const { policies, agents, live } = useLeash()
@@ -19,18 +20,21 @@ export function Policies() {
       <>
         <PageHeader
           title="Policies"
-          subtitle="Each agent's policy is its own ENS text records — read live from its resolver on Sepolia."
+          subtitle="Each agent's rules live in its ENS text records, read live from Sepolia. Leash's policy engine checks every one, up the whole chain, before any payment."
         />
+        <PolicySimulator />
+        <h2 className="mt-8 mb-3 text-[15px] font-semibold text-ink">Agent policies</h2>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {policies.map((policy) => (
             <LivePolicyCard key={policy.id} policy={policy} />
           ))}
         </div>
         <p className="copy mt-4 max-w-[72ch] text-[12.5px] text-faint">
-          The gateway enforces <span className="font-mono">budget</span> and{' '}
-          <span className="font-mono">maxPerCall</span> at every node up the chain on each payment.{' '}
-          <span className="font-mono">ratePerMinute</span> and{' '}
-          <span className="font-mono">allowedServices</span> are recorded but not enforced yet.
+          Enforced on every payment, at every node up the chain: remaining authority (the node's{' '}
+          <span className="font-mono">budget</span> minus everything its subtree has spent, replayed from HCS), the
+          per-request limit (<span className="font-mono">maxPerCall</span>), the service category (
+          <span className="font-mono">allowedServices</span>), the payment asset, and expiry or revocation.{' '}
+          <span className="font-mono">ratePerMinute</span> is recorded but not enforced yet.
         </p>
       </>
     )

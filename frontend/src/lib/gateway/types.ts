@@ -26,6 +26,48 @@ export interface ServiceManifest {
   facilitator: string
   receipts_topic: string | null
   x402_version: number
+  /** `inference`, `compute`, `data` — what `allowedServices` is checked against. */
+  category?: string
+  description?: string
+}
+
+/** A provider registering itself on the HCS topic — mirrors `meter::ServiceAnnouncement`. */
+export interface ServiceAnnouncement {
+  kind: string
+  provider: string
+  category: string
+  model: string
+  base_url: string
+  network: string
+  asset: string
+  pricing: PriceModel
+  announced_at: string
+}
+
+export interface PolicyCheck {
+  id: 'active' | 'authority' | 'per_call' | 'service' | 'asset' | 'expiry'
+  label: string
+  status: 'pass' | 'fail' | 'skipped'
+  node?: string
+  detail?: string
+}
+
+/** `POST /v1/authorize` — the policy engine's answer, without paying. */
+export interface PolicyDecision {
+  approved: boolean
+  agent: string
+  amount: number
+  service: string
+  asset: string
+  reason: string | null
+  blocked_by: string | null
+  violation: string | null
+  checks: PolicyCheck[]
+  path: MandateHop[]
+  /** Atomic units each node on the path has already spent (its subtree's roll-up). */
+  spent: Record<string, number>
+  ledger_error: string | null
+  provider: string
 }
 
 export interface MandateHop {
@@ -52,6 +94,7 @@ export interface Receipt {
   usage: Usage
   settled_at: string
   mandate_path: MandateHop[]
+  service?: string
 }
 
 /** A payment the mandate guard blocked before any price tag was issued —
@@ -69,6 +112,7 @@ export interface Refusal {
   limit?: number
   reason: string
   refused_at: string
+  service?: string
 }
 
 export interface SeedMandateRequest {

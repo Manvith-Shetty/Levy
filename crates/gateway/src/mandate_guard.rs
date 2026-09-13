@@ -7,8 +7,10 @@
 use axum::extract::{Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::Response;
-use mandate::{MandateError, MandateNode, MandateResolver, MandateViolation, MockResolver, Violation};
+use axum::response::{IntoResponse, Response};
+use mandate::{
+    AssetRef, Decision, MandateError, MandateNode, MandateResolver, MandateViolation, MockResolver, SpendRequest,
+};
 use meter::Refusal;
 
 use crate::hcs::{HcsMessage, now_rfc3339};
@@ -45,9 +47,9 @@ pub async fn gate(
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(guard) = &state.mandate else {
+    if state.mandate.is_none() {
         return next.run(request).await;
-    };
+    }
 
     let Some(agent) = query.agent else {
         return error(StatusCode::BAD_REQUEST, "missing ?agent=<ens-subname>");
@@ -59,17 +61,52 @@ pub async fn gate(
         return error(StatusCode::BAD_REQUEST, "unknown or spent quote id");
     };
 
-    match guard.check(&agent, amount).await {
-        Ok(path) => {
-            state.quotes.record_mandate_path(&quote_id, path);
+    let decision = evaluate(&state, &agent, amount, None, None).await;
+    match &decision.violation {
+        None => {
+            state.quotes.record_mandate_path(&quote_id, decision.path);
             next.run(request).await
         }
-        Err(violation) => {
+        Some(violation) => {
             tracing::warn!(%agent, node = %violation.node, reason = ?violation.reason, "mandate check failed");
-            record_refusal(&state, &agent, &quote_id, amount, &violation);
-            error(StatusCode::FORBIDDEN, &violation.to_string())
+            record_refusal(&state, &agent, &quote_id, amount, violation);
+            let body = serde_json::json!({
+                "error": violation.to_string(),
+                "blocked_by": violation.node,
+                "violation": violation.reason.kind(),
+                "checks": decision.checks,
+            });
+            (StatusCode::FORBIDDEN, axum::Json(body)).into_response()
         }
     }
+}
+
+/// Runs the policy engine for `agent` spending `amount` on this provider's
+/// service and asset (or the ones given), with the subtree's spending so far.
+pub async fn evaluate(
+    state: &AppState,
+    agent: &str,
+    amount: u64,
+    service: Option<String>,
+    asset: Option<AssetRef>,
+) -> Decision {
+    let cfg = &state.config;
+    let guard = state.mandate.as_ref().expect("evaluate needs a mandate guard");
+    let spent = state.ledger.spent().await;
+    let request = SpendRequest {
+        agent: agent.to_owned(),
+        amount,
+        service: Some(service.unwrap_or_else(|| cfg.category.clone())),
+        asset: Some(asset.unwrap_or_else(|| AssetRef {
+            id: cfg.asset.id.clone(),
+            symbol: cfg.asset.symbol.clone(),
+        })),
+    };
+    let tree = AssetRef {
+        id: cfg.tree_asset.id.clone(),
+        symbol: cfg.tree_asset.symbol.clone(),
+    };
+    guard.evaluate(&request, &spent, Some(&tree)).await
 }
 
 /// Keeps a refused payment in the in-memory log and, when HCS is enabled,
@@ -81,12 +118,7 @@ fn record_refusal(
     amount: u64,
     violation: &MandateViolation,
 ) {
-    let (kind, limit) = match violation.reason {
-        Violation::Unresolvable => ("unresolvable", None),
-        Violation::Expired => ("expired", None),
-        Violation::OverBudget { budget } => ("over_budget", Some(budget)),
-        Violation::OverPerCallLimit { max_per_call } => ("over_per_call_limit", Some(max_per_call)),
-    };
+    let (kind, limit) = (violation.reason.kind(), violation.reason.limit());
     let cfg = &state.config;
     let refusal = Refusal {
         kind: "leash.mandate.refusal.v1".into(),
@@ -101,6 +133,7 @@ fn record_refusal(
         limit,
         reason: violation.to_string(),
         refused_at: now_rfc3339(),
+        service: Some(cfg.category.clone()),
     };
     if let Some(tx) = &state.hcs
         && let Err(error) = tx.send(HcsMessage::Refusal(refusal.clone()))
@@ -133,6 +166,7 @@ mod tests {
         MandateNode {
             budget: 1_000,
             allowed_services: vec!["inference".into()],
+            allowed_assets: Vec::new(),
             rate_per_minute: 1_000,
             max_per_call: 1_000,
             expires_at: OffsetDateTime::now_utc() + Duration::days(1),
@@ -167,6 +201,14 @@ mod tests {
             quote_ttl_secs: 60,
             hcs: None,
             upstream: None,
+            category: "inference".into(),
+            description: String::new(),
+            tree_asset: AssetInfo {
+                id: "0.0.0".into(),
+                symbol: "HBAR".into(),
+                decimals: 8,
+            },
+            mirror_url: "http://localhost:0".into(),
         };
 
         AppState {
@@ -176,6 +218,7 @@ mod tests {
             hcs: None,
             mandate: Some(guard),
             mandate_mock: Some(mock),
+            ledger: Arc::new(crate::ledger::SpendLedger::new("http://localhost:0", None, "0.0.0")),
         }
     }
 

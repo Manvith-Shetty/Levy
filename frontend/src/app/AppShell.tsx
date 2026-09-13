@@ -13,12 +13,13 @@ import { DemoControls } from '../components/demo/DemoControls'
 import { config } from '../lib/config'
 import { explain } from '../lib/live/wallet'
 import { useLeash } from '../lib/store'
+import { Button } from '../components/common/Button'
 import { useToast } from './toast'
 import { useUI } from './ui'
 
 export function AppShell() {
   const ui = useUI()
-  const { revokeAgent, index, live } = useLeash()
+  const { revokeAgent, index, live, demoMode, setDemoMode } = useLeash()
   const { push } = useToast()
   const [navOpen, setNavOpen] = useState(false)
   const [revoking, setRevoking] = useState(false)
@@ -60,6 +61,17 @@ export function AppShell() {
           onOpenNav={() => setNavOpen(true)}
         />
         <main className="mx-auto w-full max-w-[1320px] flex-1 px-4 py-6 lg:px-8 lg:py-8">
+          {demoMode && (
+            <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-delegated/35 bg-delegated/[0.07] px-4 py-3">
+              <p className="copy text-[13px] text-ink-dim">
+                <span className="font-medium text-delegated">Simulated data.</span> Agents, payments and receipts here
+                are generated for the demo. Nothing touches Sepolia or Hedera.
+              </p>
+              <Button size="sm" onClick={() => setDemoMode(false)}>
+                Show the live system
+              </Button>
+            </div>
+          )}
           <Outlet />
         </main>
       </div>

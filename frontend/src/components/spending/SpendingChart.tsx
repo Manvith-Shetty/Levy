@@ -26,7 +26,8 @@ export function SpendingChart({
   const width = 720
 
   const { max, ticks } = useMemo(() => {
-    const peak = Math.max(...points.map((p) => p.total), 10)
+    // Scale to the data: live spend is fractions of a cent.
+    const peak = Math.max(0, ...points.map((p) => p.total)) || 1
     const step = niceStep(peak / 3)
     const top = Math.ceil(peak / step) * step
     const count = Math.round(top / step)
@@ -115,7 +116,7 @@ export function SpendingChart({
           >
             {[...ticks].reverse().map((tick) => (
               <span key={tick} className="numeric">
-                {money(Math.round(tick))}
+                {money(tick >= 1 ? Math.round(tick) : tick)}
               </span>
             ))}
           </div>
@@ -150,7 +151,7 @@ export function SpendingChart({
 }
 
 function niceStep(raw: number): number {
-  const magnitude = 10 ** Math.floor(Math.log10(Math.max(1, raw)))
+  const magnitude = 10 ** Math.floor(Math.log10(raw > 0 ? raw : 1))
   const normalized = raw / magnitude
   const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10
   return step * magnitude
@@ -158,7 +159,7 @@ function niceStep(raw: number): number {
 
 /** Tiny inline trend line for KPI tiles. */
 export function Sparkline({ points, tone = '#35e0ae' }: { points: DayPoint[]; tone?: string }) {
-  const max = Math.max(...points.map((p) => p.total), 1)
+  const max = Math.max(0, ...points.map((p) => p.total)) || 1
   const d = points
     .map((p, i) => `${i === 0 ? 'M' : 'L'}${(i / Math.max(1, points.length - 1)) * 100} ${18 - (p.total / max) * 16}`)
     .join(' ')

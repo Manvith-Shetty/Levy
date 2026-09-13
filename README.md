@@ -75,13 +75,14 @@ ever named, the gateway checks the agent's ENS mandate and every parent above it
 ```mermaid
 flowchart LR
   UI[Dashboard<br/>frontend/] -- "POST /v1/run (SSE)" --> R[agent-runner<br/>crates/agent]
-  R -- "discover + quote" --> A[provider A :4021]
-  R -- "discover + quote" --> B[provider B :4022]
-  R -- "discover + quote" --> C[provider C :4023]
-  A & B & C -- "mandate check" --> ENS[(ENSv2 tree<br/>Sepolia)]
-  A & B & C -- "verify + settle" --> F[Blocky402]
+  T -- "announcements (discovery)" --> R
+  R -- "quote + /v1/authorize" --> A[provider A :4021<br/>inference]
+  R -- "quote + /v1/authorize" --> B[providers B, C :4022-4023<br/>inference]
+  R -- "quote + /v1/authorize" --> D[provider D :4024<br/>compute]
+  A & B & D -- "policy engine" --> ENS[(ENSv2 tree<br/>Sepolia)]
+  A & B & D -- "verify + settle" --> F[Blocky402]
   F -- "USDC transfer" --> H[(Hedera testnet)]
-  A & B & C -- "receipt / refusal" --> T[(HCS topic)]
+  A & B & D -- "announce / receipt / refusal" --> T[(HCS topic)]
   UI -- "mirror node" --> T
   UI -- "RPC" --> ENS
 ```
@@ -114,8 +115,10 @@ sequenceDiagram
   Ag->>G: GET /.well-known/x402, POST /v1/quote
   G-->>Ag: quote (amount in USDC, per token)
   Ag->>G: POST /v1/infer?quote=…&agent=sub.agent.root
-  G->>M: walk sub.agent.root → agent.root → root
-  alt a node is revoked, expired or over its limit
+  Ag->>G: POST /v1/authorize (dry run: six checks, every node)
+  G-->>Ag: APPROVED or DENIED + checklist
+  G->>M: walk sub.agent.root → agent.root → root again, on the real request
+  alt any check fails on any node
     G-->>Ag: 403 names the blocking ancestor
     G->>T: refusal
   else mandate allows it
@@ -135,7 +138,8 @@ sequenceDiagram
 #    MANDATE_MODE=ens, HCS keys; see .env.example)
 cd crates/gateway && cargo run -p gateway
 
-# 2. Providers B and C: same binary, other names and prices
+# 2. Providers B, C (inference) and D (compute): same binary, other names,
+#    categories and prices. Each announces itself on HCS.
 scripts/demo-providers.sh
 
 # 3. The agent runner (crates/agent/.env: the shared wallet's key)
@@ -150,19 +154,48 @@ Or run one purchase from the terminal: `cd crates/agent && cargo run -p agent --
 Both payer and payee must be associated with the USDC token first
 (`cargo run -p agent --bin associate-token`).
 
-What the guard enforces today, at every node up the chain: `budget` and
-`maxPerCall`, each checked against the single payment. `ratePerMinute` and
-`allowedServices` are recorded and shown, but not enforced yet.
+### The policy engine
+
+Leash decides; the agent only asks. Before any price is named, the gateway's
+policy engine (`crates/mandate`, `MandateGuard::evaluate`) walks the agent's
+ENS chain root to leaf and runs six deterministic checks against every node:
+
+| Check | Rule |
+|---|---|
+| Agent active | The name resolves in the tree |
+| Within authority | `budget` ≥ what the node's whole subtree has already spent + this payment. Spending is replayed from the HCS receipts, so it counts across every provider and survives restarts |
+| Within per-request limit | amount ≤ `maxPerCall` |
+| Service permitted | the provider's category (`SERVICE_CATEGORY`) is in `allowedServices` |
+| Asset permitted | the payment asset is in `allowedAssets`, or, without that record, is the asset budgets are denominated in (`MANDATE_ASSET`, USDC) |
+| Not expired or revoked | the node's ENS expiry is in the future |
+
+`POST /v1/authorize` runs the same evaluation without paying or recording
+anything; the dashboard's policy simulator and the agent's "Authorize" step
+both use it. A refusal on `/v1/infer` returns the full checklist in its `403`
+and is published to HCS. `ratePerMinute` is recorded but not enforced yet.
+Known gap: two payments authorized at the same instant can both fit; each is
+still capped by `maxPerCall`, and the next check sees both.
+
+### Discovery
+
+Every gateway announces itself on the HCS topic when it starts
+(`leash.service.announce.v1`: provider, category, model, base URL, pricing).
+The agent runner discovers providers by replaying the topic (plus any in
+`PROVIDERS`), fetches each live manifest, keeps the ones selling the requested
+category, quotes them, and asks each one's policy engine, cheapest first, until
+one approves. `scripts/demo-providers.sh` starts three extra providers: B and C
+sell inference at other prices, D sells compute, which no agent's policy allows.
 
 ## Demo (≤5 min), all from the dashboard
 
 1. **Overview**: the tree, the shared wallet's USDC balance, the HCS trail.
-2. **Run a paid request** as `sub.agent.root`: three providers quote per token,
-   the cheapest wins, the mandate passes, the gateway answers `402`, the agent
-   signs a USDC transfer, Blocky402 settles it, and the completion comes back
-   with its HashScan link. Seconds later, its receipt is found on the HCS topic.
-3. Run it as an agent whose limit is below the price: refused with a `403`
-   naming the blocking node, with nothing signed. The refusal lands on HCS too.
+2. **Give `sub.agent.root` an inference task**: four providers are discovered
+   on the HCS registry, three quote per token, Leash approves the cheapest
+   (every check ✓), the agent pays it over x402, Blocky402 settles USDC on
+   Hedera, the result comes back, and the receipt is confirmed on HCS.
+3. **Give it a compute task**: provider D quotes $0.008, Leash denies it
+   (compute isn't in `allowedServices`, and it's over `maxPerCall`), nothing is
+   signed. **Policies → simulator** shows the same decision without a task.
 4. **Revoke `root`** (one `unregister` tx, no loop over children): the next run
    as `sub.agent.root` is blocked, naming `root`. Restore it.
 5. **Activity**: the whole trail, replayed from HCS.

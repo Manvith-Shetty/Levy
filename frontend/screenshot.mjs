@@ -1,7 +1,8 @@
 // Usage:
 //   node screenshot.mjs <url> [label] [--full] [--width=1440] [--height=900]
 //                        [--click="css or text=Label"]... [--type="#sel=value"]...
-//                        [--key=Meta+k]... [--wait=ms]
+//                        [--key=Meta+k]... [--pause=ms]... [--wait=ms]
+//   --wait settles once after load; --pause waits in place between actions.
 //
 // Saves to "./temporary screenshots/screenshot-N[-label].png", auto-incremented
 // and never overwritten. Interaction flags run in the order given, so modal and
@@ -58,6 +59,8 @@ for (const f of flags) {
     await el.click({ count: 3 })
     await el.type(text.join('='))
     await pause()
+  } else if (name === 'pause') {
+    await new Promise((r) => setTimeout(r, Number(value) || 1000))
   } else if (name === 'key') {
     const keys = value.split('+')
     for (const k of keys) await page.keyboard.down(k)

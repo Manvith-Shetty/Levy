@@ -132,6 +132,10 @@ export interface ActivityEvent {
   payer?: string
   /** Where this record was read from. */
   source?: 'hcs' | 'gateway' | 'ens'
+  /** Sequence number of the event's own message on the HCS topic. */
+  hcsSequence?: number
+  /** Service category bought or refused (`inference`, `compute`). */
+  category?: string
 }
 
 export interface Policy {
@@ -164,6 +168,21 @@ export interface Service {
   endpoint: string
   /** Extra facts for live services (model, pricing, topic, ...). */
   details?: Array<{ label: string; value: string; href?: string }>
+  /** Live marketplace listing, for providers agents can pay. */
+  listing?: {
+    description: string
+    model: string
+    /** Lowercase category as policies name it: `inference`, `compute`. */
+    kind: string
+    pricing: string[]
+    asset: string
+    network: string
+    /** How agents found it: announced on the HCS topic, or configured. */
+    registeredVia: 'hcs' | 'configured' | 'gateway'
+    announcedAt?: string
+    /** Agents whose policy (and every parent's) permits this category. */
+    authorizedAgents: string[]
+  }
 }
 
 export interface NotificationSettings {

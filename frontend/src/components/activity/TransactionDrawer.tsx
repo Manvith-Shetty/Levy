@@ -88,6 +88,37 @@ export function TransactionDrawer({
         )}
       </div>
 
+      {isPayment && event.source && (
+        <ol className="mt-4 space-y-1.5 rounded-lg border border-line bg-sunken px-4 py-3 text-[12.5px]">
+          <Stage
+            ok={event.kind === 'payment.approved'}
+            label="Policy"
+            value={event.kind === 'payment.approved' ? 'Approved by Leash' : 'Denied by Leash'}
+          />
+          <Stage
+            ok={event.kind === 'payment.approved' ? true : null}
+            label="x402 payment"
+            value={event.kind === 'payment.approved' ? 'Settled via Blocky402' : 'Never attempted'}
+          />
+          <Stage
+            ok={event.txId ? true : null}
+            label="Hedera"
+            value={event.txId ? 'Transaction confirmed' : 'No transaction'}
+            href={event.txId ? explorer : undefined}
+          />
+          <Stage
+            ok={event.source === 'hcs' ? true : false}
+            label="HCS audit"
+            value={
+              event.source === 'hcs'
+                ? `Recorded${event.hcsSequence != null ? `, message #${event.hcsSequence}` : ''}`
+                : 'Not on the topic yet'
+            }
+            href={event.source === 'hcs' && live.snapshot?.topicId ? hashscanUrl('topic', live.snapshot.topicId) : undefined}
+          />
+        </ol>
+      )}
+
       <dl className="mt-5">
         <Row label="Agent">
           {agent ? (
@@ -106,7 +137,12 @@ export function TransactionDrawer({
             </Link>
           </Row>
         )}
-        {event.service && <Row label="Service">{event.service}</Row>}
+        {event.service && (
+          <Row label="Service">
+            {event.service}
+            {event.category ? <span className="text-muted"> · {event.category}</span> : null}
+          </Row>
+        )}
         {isPayment && (
           <Row label="Requested">
             <span className="numeric">{eventAmount(event)}</span>
@@ -157,6 +193,11 @@ export function TransactionDrawer({
         </div>
       )}
 
+      {(event.txId || (event.mandatePath && event.mandatePath.length > 0)) && (
+        <details className="group mt-5 border-t border-hairline pt-3" open={!event.source}>
+          <summary className="press cursor-pointer list-none text-[12.5px] text-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-authority/60">
+            <span className="inline-block transition-transform duration-200 group-open:rotate-90">›</span> Technical details
+          </summary>
       {event.mandatePath && event.mandatePath.length > 0 && (
         <div className="mt-5">
           <p className="text-[12.5px] text-muted">Authorized by</p>
@@ -207,6 +248,29 @@ export function TransactionDrawer({
           Replayed from HCS topic {live.snapshot.topicId}
         </a>
       )}
+        </details>
+      )}
     </Drawer>
+  )
+}
+
+function Stage({ ok, label, value, href }: { ok: boolean | null; label: string; value: string; href?: string }) {
+  return (
+    <li className="flex items-baseline gap-2.5">
+      <span
+        aria-hidden
+        className={cx('w-3 shrink-0 text-center font-semibold', ok === true ? 'text-authority' : ok === false ? 'text-blocked' : 'text-faint')}
+      >
+        {ok === true ? '✓' : ok === false ? '✕' : '–'}
+      </span>
+      <span className="w-24 shrink-0 text-muted">{label}</span>
+      {href ? (
+        <a href={href} target="_blank" rel="noreferrer" className="text-ink hover:text-authority focus-visible:underline active:opacity-70">
+          {value}
+        </a>
+      ) : (
+        <span className="text-ink">{value}</span>
+      )}
+    </li>
   )
 }

@@ -5,6 +5,7 @@
  */
 
 import { config } from '../config'
+import type { PolicyDecision } from '../gateway/types'
 
 export interface AssetInfo {
   id: string
@@ -18,13 +19,31 @@ export interface PriceModel {
   minimum: number
 }
 
+export interface DiscoveredProvider {
+  base_url: string
+  source?: 'hcs' | 'configured'
+  manifest?: { provider: string; model: string; category?: string; description?: string }
+  error?: string
+}
+
 export type RunStep =
-  | { step: 'start'; agent: string; payer: string; prompt: string; budget_atomic: number; max_output_tokens: number }
+  | {
+      step: 'start'
+      agent: string
+      service: string
+      payer: string
+      prompt: string
+      budget_atomic: number
+      max_output_tokens: number
+    }
+  | { step: 'discovered'; providers: DiscoveredProvider[] }
+  | { step: 'no_provider'; service: string; unavailable?: boolean }
   | {
       step: 'quote'
       base_url: string
       provider: string
       model: string
+      category?: string
       pricing: PriceModel
       input_tokens: number
       max_output_tokens: number
@@ -33,13 +52,18 @@ export type RunStep =
       network: string
       pay_to: string
       facilitator: string
+      quote_id: string
     }
   | { step: 'quote_failed'; base_url: string; message: string }
   | { step: 'over_budget'; budget_atomic: number; cheapest: number; asset: AssetInfo }
+  | { step: 'authorization'; provider: string; quote_id: string; decision: PolicyDecision }
+  | { step: 'authorization_failed'; provider: string; message: string }
+  | { step: 'denied'; decision: PolicyDecision | null }
   | { step: 'selected'; provider: string; amount: number; asset: AssetInfo; passed_over: number; quote_id: string }
   | { step: 'payment_required'; requirements: unknown }
   | { step: 'refused'; reason: string }
   | { step: 'paying'; payer: string }
+  | { step: 'payment_failed'; message: string }
   | { step: 'settled'; transaction: string; network: string; payer: string; explorer: string }
   | {
       step: 'result'
@@ -52,6 +76,8 @@ export type RunStep =
       asset: AssetInfo
       quote_id: string
     }
+  | { step: 'audited'; topic: string; sequence: number; consensus_timestamp: string }
+  | { step: 'audit_pending'; topic: string | null }
   | { step: 'error'; message: string }
   | { step: 'done'; elapsed_ms: number }
 
@@ -65,7 +91,11 @@ export interface RunnerInfo {
 
 export interface ProviderEntry {
   base_url: string
+  /** `hcs` when it announced itself on the topic, `configured` otherwise. */
+  source?: 'hcs' | 'configured'
   manifest?: {
+    category?: string
+    description?: string
     provider: string
     model: string
     base_url: string
@@ -81,6 +111,7 @@ export interface ProviderEntry {
 
 export interface RunRequest {
   agent: string
+  service?: string
   prompt?: string
   max_output_tokens?: number
   budget_atomic?: number

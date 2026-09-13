@@ -7,15 +7,18 @@ export function LiveActivity({
   events,
   onSelect,
   limit = 10,
+  columns = true,
 }: {
   events: ActivityEvent[]
   onSelect: (event: ActivityEvent) => void
   limit?: number
+  /** Two columns on wide screens; off for narrow cards. */
+  columns?: boolean
 }) {
   const { index } = useLeash()
 
   return (
-    <ul className="gap-x-10 lg:columns-2">
+    <ul className={cx(columns && 'gap-x-10 lg:columns-2')}>
       {events.slice(0, limit).map((event) => (
         <li key={event.id} className="break-inside-avoid">
           <button

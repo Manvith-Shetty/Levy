@@ -77,9 +77,9 @@ export function Activity() {
         formatDateTime(event.timestamp),
         KIND_LABEL[event.kind],
         index[event.agentId]?.name ?? event.agentId,
-        event.amount?.toFixed(2) ?? '',
+        event.amount?.toFixed(6) ?? '',
         event.service ?? '',
-        event.kind === 'payment.blocked' ? 'blocked' : 'ok',
+        event.kind === 'payment.blocked' ? 'denied' : 'ok',
         event.reason ?? '',
         event.txId ?? '',
       ]),
@@ -146,7 +146,7 @@ export function Activity() {
           >
             <option value="all">Status: All</option>
             <option value="approved">Approved</option>
-            <option value="blocked">Blocked</option>
+            <option value="blocked">Denied</option>
           </Select>
           <Select
             value={days}

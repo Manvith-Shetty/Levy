@@ -46,12 +46,17 @@ receipts.
 
 ## Making a paid request
 
-**Run a paid request** (Overview, any agent's page, or ⌘K) starts a real x402
-purchase through the agent runner (`cargo run -p agent --bin agent-runner`),
-which holds the shared Hedera wallet. The dashboard streams each step:
-discovery and per-token quotes from every provider, selection under the spend
-cap, the mandate check and the `402`, the signed USDC transfer settled by
-Blocky402, the result, and finally the run's own message on the HCS topic.
+**Run a paid request** (Overview, any agent's page, a service's "Buy with an
+agent", or ⌘K) gives an agent a task and follows it through the agent runner
+(`cargo run -p agent --bin agent-runner`), which holds the shared Hedera
+wallet: Discover (providers announced on HCS) → Quote (per token) → Authorize
+(the policy engine's checklist) → Pay (x402, settled by Blocky402) → Execute →
+Result → Audit (the receipt confirmed on the HCS topic). Every failure has its
+own state: no provider, over the spend cap, policy denied, insufficient
+authority, payment failed, service failed, audit pending.
+
+**Policies → Policy simulator** asks the gateway's policy engine
+(`POST /api/v1/authorize`) about a payment that never happens.
 
 The runner has no CORS, so it's reached at `/runner` like the gateway is at
 `/api`: `RUNNER_PROXY_TARGET` in dev (default `http://localhost:4030`), and a
@@ -72,7 +77,8 @@ reason.
   root).
 - **Create** — `MandateRegistrar.registerChild` (which checks budget ≤ parent's
   and expiry ≤ parent's on-chain), then one resolver `multicall` writing the
-  four text records. Only agents with a subregistry and a registrar binding
+  five policy records (budget, maxPerCall, ratePerMinute, allowedServices,
+  allowedAssets). Only agents with a subregistry and a registrar binding
   can have children — today that's `root` and `agent.root`.
 
 ## Deploying

@@ -10,16 +10,14 @@ import {
   IconPolicies,
   IconServices,
   IconSettings,
-  IconSpending,
 } from './icons'
 
 const NAV = [
   { to: '/', label: 'Overview', Icon: IconOverview, end: true },
   { to: '/agents', label: 'Agents', Icon: IconAgents },
-  { to: '/spending', label: 'Spending', Icon: IconSpending },
-  { to: '/activity', label: 'Activity', Icon: IconActivity },
-  { to: '/policies', label: 'Policies', Icon: IconPolicies },
   { to: '/services', label: 'Services', Icon: IconServices },
+  { to: '/policies', label: 'Policies', Icon: IconPolicies },
+  { to: '/activity', label: 'Activity', Icon: IconActivity },
   { to: '/settings', label: 'Settings', Icon: IconSettings },
 ]
 

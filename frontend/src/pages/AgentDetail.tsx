@@ -334,10 +334,11 @@ function LivePermissions({ agent }: { agent: Agent }) {
   const { hops, limit } = effectiveCeiling(index, agent.id)
 
   const records: Array<[string, string, string?]> = [
-    ['budget', money(agent.authority)],
-    ['maxPerCall', money(mandate.maxPerCall)],
-    ['ratePerMinute', money(mandate.ratePerMinute), 'Not enforced by the gateway yet'],
-    ['allowedServices', mandate.allowedServices.join(', ') || '—', 'Not enforced by the gateway yet'],
+    ['budget', money(agent.authority), 'Total authority; everything spent under this agent counts against it'],
+    ['maxPerCall', money(mandate.maxPerCall), 'Largest single payment'],
+    ['allowedServices', mandate.allowedServices.join(', ') || '—', 'Anything else is denied'],
+    ['allowedAssets', config.assetSymbol, 'No record, so only the asset budgets are in'],
+    ['ratePerMinute', money(mandate.ratePerMinute), 'Recorded, not enforced yet'],
   ]
 
   return (
@@ -376,7 +377,7 @@ function LivePermissions({ agent }: { agent: Agent }) {
       <Card>
         <CardHead
           title="Largest payment right now"
-          hint="The gateway checks every payment against each node's budget and max per call, root to leaf."
+          hint="Every payment must fit what's left of each node's authority and its max per call, root to leaf."
         />
         {limit && (
           <p className="mt-4">

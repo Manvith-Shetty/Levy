@@ -1,25 +1,49 @@
 #!/usr/bin/env bash
-# Starts two extra providers next to the main gateway (4021), so the agent
-# has quotes to compare: the same gateway binary, a different name, model and
-# price. They share crates/gateway/.env (payee, asset, mandate tree, HCS topic)
-# — only the variables below are overridden.
+# Starts extra providers next to the main gateway (4021), so the agent has
+# quotes to compare and a service its policy doesn't allow: the same gateway
+# binary with a different name, model, category and price. They share
+# crates/gateway/.env (payee, asset, mandate tree, HCS topic); only the
+# variables below are overridden. Each announces itself on the HCS topic.
 #
-#   scripts/demo-providers.sh          # start B (4022) and C (4023)
+#   scripts/demo-providers.sh          # (re)start B, C (inference) and D (compute)
+#   scripts/demo-providers.sh stop     # stop the ones this script started
 #
-# Logs go to /tmp/leash-provider-{b,c}.log. Stop them with the PIDs it prints.
+# Logs: /tmp/leash-provider-<x>.log. Only PIDs this script recorded in
+# /tmp/leash-provider-<x>.pid are ever stopped.
 set -euo pipefail
 cd "$(dirname "$0")/../crates/gateway"
 bin=../../target/debug/gateway
-[ -x "$bin" ] || cargo build -p gateway
 
-start() {
-  local name=$1 port=$2 model=$3 input=$4 output=$5
-  PROVIDER_NAME=$name PORT=$port BASE_URL=http://localhost:$port MODEL=$model \
-    INPUT_PRICE_PER_1K=$input OUTPUT_PRICE_PER_1K=$output \
-    nohup "$bin" > "/tmp/$name.log" 2>&1 &
-  echo "$name  http://localhost:$port  pid $!"
+stop() {
+  local name=$1 pidfile="/tmp/$1.pid"
+  if [ -f "$pidfile" ]; then
+    local pid; pid=$(cat "$pidfile")
+    if kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" | grep -q "target/debug/gateway"; then
+      kill "$pid" && echo "stopped $name (pid $pid)"
+    fi
+    rm -f "$pidfile"
+  fi
 }
 
+start() {
+  local name=$1 port=$2 category=$3 model=$4 input=$5 output=$6 minimum=$7
+  stop "$name"
+  PROVIDER_NAME=$name PORT=$port BASE_URL=http://localhost:$port MODEL=$model \
+    SERVICE_CATEGORY=$category INPUT_PRICE_PER_1K=$input OUTPUT_PRICE_PER_1K=$output MIN_PAYMENT=$minimum \
+    nohup "$bin" > "/tmp/$name.log" 2>&1 &
+  echo $! > "/tmp/$name.pid"
+  echo "$name  $category  http://localhost:$port  pid $!"
+}
+
+if [ "${1:-}" = "stop" ]; then
+  for p in leash-provider-b leash-provider-c leash-provider-d; do stop $p; done
+  exit 0
+fi
+
+[ -x "$bin" ] || cargo build -p gateway
+
 # USDC atomic units (6 decimals) per 1k tokens. Provider A (4021) is 1000 / 4000.
-start leash-provider-b 4022 echo-mini 600 2500
-start leash-provider-c 4023 echo-pro 2000 8000
+start leash-provider-b 4022 inference echo-mini 600 2500 100
+start leash-provider-c 4023 inference echo-pro 2000 8000 100
+# Compute: a flat $0.008 minimum per job. No agent in the tree allows compute.
+start leash-provider-d 4024 compute gpu-burst 4000 16000 8000
