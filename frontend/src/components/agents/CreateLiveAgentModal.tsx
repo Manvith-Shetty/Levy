@@ -136,6 +136,14 @@ export function CreateLiveAgentModal({
 
   const busy = progress !== null
 
+  const treeOwner = parent?.account?.toLowerCase()
+  const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`
+  const signerNote = !live.hasWallet
+    ? 'Both signatures happen on Sepolia, so this needs an Ethereum wallet such as MetaMask, not a Hedera account.'
+    : live.account && treeOwner && live.account.toLowerCase() !== treeOwner
+      ? `Only ${short(treeOwner)}, which owns this tree, can write the records. Switch to that account, or this is refused before anything is signed.`
+      : null
+
   return (
     <Modal open onClose={busy ? () => undefined : onClose} width="max-w-2xl" labelledBy="create-live-title">
       <ModalHead id="create-live-title" title="Create Agent" onClose={busy ? () => undefined : onClose}>
@@ -342,6 +350,7 @@ export function CreateLiveAgentModal({
                   </li>
                 ))}
               </ol>
+              {signerNote && <p className="copy mt-3 text-[12px] text-warn">{signerNote}</p>}
             </div>
           </div>
         )}

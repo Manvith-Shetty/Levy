@@ -35,7 +35,11 @@ export function hasInjectedWallet(): boolean {
 }
 
 function walletClient() {
-  if (!window.ethereum) throw new Error('No browser wallet found. Install MetaMask to sign on Sepolia.')
+  if (!window.ethereum) {
+    throw new Error(
+      'No browser wallet found. The agent tree lives on Sepolia, so this needs an Ethereum wallet such as MetaMask — not a Hedera account.',
+    )
+  }
   return createWalletClient({ chain: sepolia, transport: custom(window.ethereum) })
 }
 
@@ -154,11 +158,33 @@ export type CreateStep = 'mint' | 'records'
 /**
  * Mints a child through the MandateRegistrar (which enforces budget ≤ parent
  * and expiry ≤ parent on-chain), then writes its four text records in one
- * resolver multicall. Two signatures.
+ * resolver multicall. Two signatures, both simulated before the first one.
  */
 export async function createChild(spec: ChildSpec, onStep: (step: CreateStep) => void): Promise<Hash[]> {
   const owner = (await currentAccount()) ?? (await connect())
   const resolver = getAddress(spec.parent.resolver.toLowerCase())
+
+  const node = namehash(`${spec.label}.${spec.parent.name}`)
+  const setText = (key: string, value: string) =>
+    encodeFunctionData({ abi: resolverAbi, functionName: 'setText', args: [node, key, value] })
+  const writeRecords = {
+    address: resolver,
+    abi: resolverAbi,
+    functionName: 'multicall',
+    args: [
+      [
+        setText('budget', spec.budget.toString()),
+        setText('maxPerCall', spec.maxPerCall.toString()),
+        setText('ratePerMinute', spec.ratePerMinute.toString()),
+        setText('allowedServices', spec.allowedServices.join(',')),
+      ],
+    ],
+  } as const
+
+  // Minting is open to anyone, but writing records needs a role on the
+  // parent's resolver. Check that first, so a wallet without it fails before
+  // it mints a name with no budget.
+  await client.simulateContract({ ...writeRecords, account: owner } as never)
 
   onStep('mint')
   const minted = await send({
@@ -178,22 +204,7 @@ export async function createChild(spec: ChildSpec, onStep: (step: CreateStep) =>
   })
 
   onStep('records')
-  const node = namehash(`${spec.label}.${spec.parent.name}`)
-  const setText = (key: string, value: string) =>
-    encodeFunctionData({ abi: resolverAbi, functionName: 'setText', args: [node, key, value] })
-  const records = await send({
-    address: resolver,
-    abi: resolverAbi,
-    functionName: 'multicall',
-    args: [
-      [
-        setText('budget', spec.budget.toString()),
-        setText('maxPerCall', spec.maxPerCall.toString()),
-        setText('ratePerMinute', spec.ratePerMinute.toString()),
-        setText('allowedServices', spec.allowedServices.join(',')),
-      ],
-    ],
-  })
+  const records = await send(writeRecords)
   return [minted, records]
 }
 
