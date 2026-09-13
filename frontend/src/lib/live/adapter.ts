@@ -121,9 +121,12 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
       `The gateway settles in ${manifest.asset.symbol}, but budgets are read as ${TREE_ASSET.symbol}. Set PAYMENT_ASSET=usdc on the gateway — ${manifest.asset.symbol} payments are listed but not counted toward spend.`,
     )
   }
-  if (snapshot.payer && !snapshot.payer.associated) {
+  const payer = snapshot.payer
+  if (payer && !(payer.token && payer.token > 0)) {
     warnings.push(
-      `The shared payer ${snapshot.payer.id} isn't associated with ${TREE_ASSET.symbol} (${TREE_ASSET.id}), so ${TREE_ASSET.symbol} payments from it will fail until it is.`,
+      !payer.associated && !payer.autoAssociates
+        ? `The shared payer ${payer.id} isn't associated with ${TREE_ASSET.symbol} (${TREE_ASSET.id}). Associate it, then fund it — until then every payment from it fails.`
+        : `The shared payer ${payer.id} holds no ${TREE_ASSET.symbol} yet, so every payment from it fails. Send it testnet ${TREE_ASSET.symbol} (${TREE_ASSET.id}) — ${payer.associated ? 'it is already associated' : 'it associates automatically on first receipt'}.`,
     )
   }
 

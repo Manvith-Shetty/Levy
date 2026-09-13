@@ -65,7 +65,8 @@ export interface LiveContext {
   warnings: string[]
   snapshot: LiveSnapshot | null
   nodes: Record<string, EnsNode>
-  refresh: () => Promise<void>
+  /** Re-reads every source now; `force` also retries a backed-off gateway. */
+  refresh: (force?: boolean) => Promise<void>
   /** Browser wallet used to sign tree changes on Sepolia. */
   account?: string
   hasWallet: boolean

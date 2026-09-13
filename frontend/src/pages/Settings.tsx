@@ -131,7 +131,7 @@ function LiveSettings() {
             <Fact label="Account" value={config.payerAccount} href={hashscanUrl('account', config.payerAccount)} />
             <Fact
               label={treeAsset.symbol}
-              value={payer ? (payer.associated ? money(payer.token ?? 0) : `Not associated with ${treeAsset.id}`) : '—'}
+              value={payer ? (payer.token ? money(payer.token) : payer.associated || payer.autoAssociates ? 'None yet' : `Not associated with ${treeAsset.id}`) : '—'}
             />
             <Fact label="HBAR (fees)" value={payer ? payer.hbar.toFixed(4) : '—'} />
           </dl>
@@ -190,7 +190,7 @@ function LiveSettings() {
             title="Data sources"
             hint={live.snapshot ? `Last read ${timeAgo(new Date(live.snapshot.fetchedAt).toISOString())}. Refreshes every ${Math.round(config.pollMs / 1000)}s.` : 'Loading…'}
             action={
-              <Button size="sm" disabled={live.refreshing} onClick={() => void live.refresh()}>
+              <Button size="sm" disabled={live.refreshing} onClick={() => void live.refresh(true)}>
                 {live.refreshing ? 'Refreshing…' : 'Refresh now'}
               </Button>
             }

@@ -72,11 +72,16 @@ export interface PayerAccount {
   token?: number
   /** Whether the account is associated with the asset token at all. */
   associated: boolean
+  /** Whether it picks up new tokens on first receipt (HIP-904), so it
+   *  needs no explicit association — only a balance. */
+  autoAssociates: boolean
 }
 
 export async function readAccount(id: string): Promise<PayerAccount> {
   const [account, tokens] = await Promise.all([
-    mirror<{ balance: { balance: number } }>(`/api/v1/accounts/${id}`),
+    mirror<{ balance: { balance: number }; max_automatic_token_associations?: number }>(
+      `/api/v1/accounts/${id}`,
+    ),
     mirror<{ tokens: Array<{ token_id: string; balance: number }> }>(
       `/api/v1/accounts/${id}/tokens?token.id=${config.assetTokenId}`,
     ).catch(() => ({ tokens: [] })),
@@ -87,5 +92,8 @@ export async function readAccount(id: string): Promise<PayerAccount> {
     hbar: account.balance.balance / 1e8,
     token: holding ? holding.balance / 10 ** config.assetDecimals : undefined,
     associated: Boolean(holding),
+    autoAssociates:
+      account.max_automatic_token_associations === -1 ||
+      (account.max_automatic_token_associations ?? 0) > 0,
   }
 }
