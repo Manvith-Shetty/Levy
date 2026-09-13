@@ -1,0 +1,16 @@
+# Builds and runs the `agent-runner` binary (what the dashboard calls via /runner).
+# Deploy this as its own Railway service with "Dockerfile Path" = Dockerfile.runner
+FROM rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler pkg-config libssl-dev cmake \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . .
+RUN cargo build --release -p agent --bin agent-runner
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /app/target/release/agent-runner /usr/local/bin/agent-runner
+CMD ["agent-runner"]

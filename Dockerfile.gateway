@@ -1,0 +1,16 @@
+# Builds and runs the `gateway` binary (the x402 provider service).
+# Deploy this as one Railway service with "Dockerfile Path" = Dockerfile.gateway
+FROM rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler pkg-config libssl-dev cmake \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . .
+RUN cargo build --release -p gateway
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /app/target/release/gateway /usr/local/bin/gateway
+CMD ["gateway"]
