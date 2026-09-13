@@ -8,6 +8,10 @@ description = "Buyer client for x402-gated, mandate-checked Hedera services — 
 name = "agent"
 path = "src/bin/agent.rs"
 
+[[bin]]
+name = "associate-token"
+path = "src/bin/associate_token.rs"
+
 [dependencies]
 common = { workspace = true }
 meter = { workspace = true }
