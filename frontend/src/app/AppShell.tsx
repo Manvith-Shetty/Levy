@@ -6,9 +6,11 @@ import { CommandMenu } from '../components/layout/CommandMenu'
 import { CreateAgentModal } from '../components/agents/CreateAgentModal'
 import { CreateLiveAgentModal } from '../components/agents/CreateLiveAgentModal'
 import { RevokeAgentModal } from '../components/agents/RevokeAgentModal'
+import { RunAgentModal } from '../components/agents/RunAgentModal'
 import { AgentDrawer } from '../components/agents/AgentDrawer'
 import { TransactionDrawer } from '../components/activity/TransactionDrawer'
 import { DemoControls } from '../components/demo/DemoControls'
+import { config } from '../lib/config'
 import { explain } from '../lib/live/wallet'
 import { useLeash } from '../lib/store'
 import { useToast } from './toast'
@@ -66,6 +68,7 @@ export function AppShell() {
         open={ui.commandOpen}
         onClose={() => ui.setCommandOpen(false)}
         onCreateAgent={() => ui.openCreate()}
+        onRunAgent={live.active && config.runnerEnabled ? () => ui.openRun() : undefined}
       />
 
       {live.active ? (
@@ -81,6 +84,15 @@ export function AppShell() {
           open={ui.createOpen}
           onClose={ui.closeCreate}
           parentId={ui.createParentId}
+        />
+      )}
+
+      {live.active && ui.runOpen && (
+        <RunAgentModal
+          key={`run-${ui.runAgentId ?? 'default'}`}
+          open
+          onClose={ui.closeRun}
+          agentId={ui.runAgentId}
         />
       )}
 

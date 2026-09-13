@@ -22,6 +22,7 @@ import type {
 } from '../types'
 import type { EnsNode, EnsSnapshot } from './ens'
 import type { PayerAccount, TopicEntry } from './hedera'
+import type { ProviderEntry } from './runner'
 
 export type SourceKey = 'ens' | 'hcs' | 'gateway' | 'payer'
 
@@ -33,6 +34,8 @@ export interface LiveSnapshot {
   gatewayRefusals: Refusal[]
   manifest?: ServiceManifest
   payer?: PayerAccount
+  /** Providers the agent runner shops across, when it's running. */
+  providers?: ProviderEntry[]
   errors: Partial<Record<SourceKey, string>>
   fetchedAt: number
 }
@@ -321,26 +324,35 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
   // --- Services ---------------------------------------------------------------
   const services: Service[] = []
   const providers = new Set(events.filter((e) => e.kind === 'payment.approved').map((e) => e.service!))
-  if (manifest) {
-    const a = manifest.asset
+  const providerCard = (m: ServiceManifest | NonNullable<ProviderEntry['manifest']>, connected: boolean): Service => {
+    const a = m.asset
     const price = (atomic: number) => `${units(atomic, a.decimals)} ${a.symbol}`
-    services.push({
-      id: `svc_${manifest.provider}`,
-      name: manifest.provider,
+    return {
+      id: `svc_${m.provider}`,
+      name: m.provider,
       category: 'Inference',
-      connected: !snapshot.errors.gateway,
+      connected,
       resource: 'inference',
-      endpoint: manifest.base_url,
+      endpoint: m.base_url,
       details: [
-        { label: 'Model', value: manifest.model },
-        { label: 'Per 1K input tokens', value: price(manifest.pricing.per_1k_input) },
-        { label: 'Per 1K output tokens', value: price(manifest.pricing.per_1k_output) },
-        { label: 'Minimum charge', value: price(manifest.pricing.minimum) },
-        { label: 'Pays to', value: manifest.pay_to, href: hashscanUrl('account', manifest.pay_to) },
-        { label: 'Facilitator', value: manifest.facilitator.replace(/^https?:\/\//, '') },
+        { label: 'Model', value: m.model },
+        { label: 'Per 1K input tokens', value: price(m.pricing.per_1k_input) },
+        { label: 'Per 1K output tokens', value: price(m.pricing.per_1k_output) },
+        { label: 'Minimum charge', value: price(m.pricing.minimum) },
+        { label: 'Pays to', value: m.pay_to, href: hashscanUrl('account', m.pay_to) },
+        { label: 'Facilitator', value: m.facilitator.replace(/^https?:\/\//, '') },
       ],
-    })
+    }
+  }
+  if (manifest) {
+    services.push(providerCard(manifest, !snapshot.errors.gateway))
     providers.delete(manifest.provider)
+  }
+  // Everything else the agent runner discovers.
+  for (const entry of snapshot.providers ?? []) {
+    if (!entry.manifest || services.some((svc) => svc.name === entry.manifest!.provider)) continue
+    services.push(providerCard(entry.manifest, true))
+    providers.delete(entry.manifest.provider)
   }
   for (const provider of providers) {
     services.push({

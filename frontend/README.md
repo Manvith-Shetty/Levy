@@ -30,6 +30,7 @@ at a redeploy, copy `.env.example` to `.env` and override what changed.
 | Payments and refusals | HCS topic via the Hedera mirror node | The gateway publishes both to one topic (`kind` tells them apart), so the log survives gateway restarts and anyone can replay it. |
 | Manifest, in-memory receipts and refusals | The gateway, through `/api` | Optional — HCS already carries the same records. |
 | Shared agent wallet balance | Hedera mirror node | Every demo agent pays from `VITE_HEDERA_PAYER_ACCOUNT`. |
+| Paid requests | The agent runner, through `/runner` | Optional: only needed to start purchases from the dashboard. |
 
 Amounts: on-chain budgets and receipt amounts are raw integers. The dashboard
 reads them as USDC (6 decimals — `VITE_ASSET_*`), so the live tree's
@@ -42,6 +43,20 @@ What the gateway enforces on each payment, at every node up the chain:
 running total). `ratePerMinute` and `allowedServices` are recorded and shown,
 but not enforced yet. "Spent" in the dashboard is the sum of that agent's
 receipts.
+
+## Making a paid request
+
+**Run a paid request** (Overview, any agent's page, or ⌘K) starts a real x402
+purchase through the agent runner (`cargo run -p agent --bin agent-runner`),
+which holds the shared Hedera wallet. The dashboard streams each step:
+discovery and per-token quotes from every provider, selection under the spend
+cap, the mandate check and the `402`, the signed USDC transfer settled by
+Blocky402, the result, and finally the run's own message on the HCS topic.
+
+The runner has no CORS, so it's reached at `/runner` like the gateway is at
+`/api`: `RUNNER_PROXY_TARGET` in dev (default `http://localhost:4030`), and a
+`/runner/*` rewrite when deployed. If the runner was started with
+`RUNNER_TOKEN`, set `VITE_RUNNER_TOKEN` to match.
 
 ## Writing to the tree
 
@@ -72,6 +87,9 @@ to the gateway, stripping it:
 - Vercel (`vercel.json`): `{ "rewrites": [{ "source": "/api/:path*", "destination": "https://your-gateway/:path*" }] }`
 - Netlify (`_redirects`): `/api/*  https://your-gateway/:splat  200`
 - Nginx: `location /api/ { rewrite ^/api/(.*)$ /$1 break; proxy_pass https://your-gateway; }`
+
+Do the same for `/runner/*` → the agent runner. Keep `proxy_buffering off` (Nginx)
+so its step stream isn't held back until the run ends.
 
 **Direct calls** — set `VITE_GATEWAY_URL=https://your-gateway` at build time,
 once the gateway sends CORS headers for your origin.

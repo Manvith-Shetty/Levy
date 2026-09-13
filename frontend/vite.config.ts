@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
   // and must never reach the browser bundle (see .env.example).
   const env = loadEnv(mode, process.cwd(), '')
   const gatewayUrl = env.GATEWAY_PROXY_TARGET || 'http://localhost:4021'
+  const runnerUrl = env.RUNNER_PROXY_TARGET || 'http://localhost:4030'
 
   return {
     plugins: [react(), tailwindcss()],
@@ -22,6 +23,12 @@ export default defineConfig(({ mode }) => {
           target: gatewayUrl,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api/, ''),
+        },
+        // The agent runner, same idea: /runner/v1/run → RUNNER_PROXY_TARGET/v1/run.
+        '/runner': {
+          target: runnerUrl,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/runner/, ''),
         },
       },
     },

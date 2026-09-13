@@ -48,6 +48,17 @@ export const config = {
   gatewayEnabled: read('VITE_GATEWAY_ENABLED', 'true') !== 'false',
 
   pollMs: Number(read('VITE_POLL_MS', '15000')),
+
+  // Agent runner --------------------------------------------------------------
+  /** The agent runner (`cargo run -p agent --bin agent-runner`) makes real
+   *  paid requests from the shared wallet on the dashboard's behalf. Like the
+   *  gateway it has no CORS, so by default it's reached through a same-origin
+   *  `/runner` proxy; set a full URL only for a runner that allows your origin. */
+  runnerEnabled: read('VITE_RUNNER_ENABLED', 'true') !== 'false',
+  runnerUrl: read('VITE_RUNNER_URL', '/runner'),
+  /** Sent as a bearer token when the runner was started with RUNNER_TOKEN.
+   *  It ends up in the bundle, so it deters drive-by use — it isn't a secret. */
+  runnerToken: read('VITE_RUNNER_TOKEN', ''),
 }
 
 export const SEPOLIA_CHAIN_ID = 11155111

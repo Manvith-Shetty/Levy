@@ -76,6 +76,23 @@ pub enum PurchaseOutcome {
     },
 }
 
+/// What the gated endpoint says before any payment is attached.
+#[derive(Debug)]
+pub enum Challenge {
+    /// The mandate passed and the provider named its price: the `402`
+    /// payment requirements, decoded from the `payment-required` header (or
+    /// the body, for gateways that send it there).
+    PaymentRequired {
+        /// The decoded x402 requirements, as the provider sent them.
+        requirements: serde_json::Value,
+    },
+    /// The mandate guard refused before any price tag was issued.
+    MandateRejected {
+        /// The gateway's `403` reason.
+        reason: String,
+    },
+}
+
 /// Buys metered, mandate-gated work from any gateway speaking this protocol.
 pub struct Client {
     http: reqwest::Client,
@@ -122,6 +139,45 @@ impl Client {
             .context("quote was not a QuoteResponse")?;
 
         Ok(Offer { manifest, quote })
+    }
+
+    /// Calls the gated endpoint once without paying, to see what it will
+    /// ask for. Nothing is signed and the quote is not spent: the mandate
+    /// guard answers `403`, or the x402 layer answers `402` with its price.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the gateway is unreachable or answers with
+    /// anything other than `402` or `403`.
+    pub async fn challenge(&self, offer: &Offer, agent_ens_name: &str) -> Result<Challenge> {
+        let url = format!("{}&agent={agent_ens_name}", offer.quote.infer_url);
+        let response = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("probe request failed")?;
+        let status = response.status();
+        let header = response
+            .headers()
+            .get("payment-required")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| BASE64_STANDARD.decode(v).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let body = response.text().await.unwrap_or_default();
+
+        match status {
+            reqwest::StatusCode::FORBIDDEN => Ok(Challenge::MandateRejected {
+                reason: rejection_reason(body),
+            }),
+            reqwest::StatusCode::PAYMENT_REQUIRED => Ok(Challenge::PaymentRequired {
+                requirements: header
+                    .or_else(|| serde_json::from_str(&body).ok())
+                    .unwrap_or(serde_json::Value::Null),
+            }),
+            other => bail!("provider answered {other} to an unpaid request: {body}"),
+        }
     }
 
     /// Pays for `offer` and calls its gated endpoint as `agent_ens_name`,
@@ -181,11 +237,9 @@ impl Client {
         // 403 — anything else (insufficient balance, bad request) uses a
         // different status, so this check is unambiguous.
         if status == reqwest::StatusCode::FORBIDDEN {
-            let reason = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
-                .unwrap_or(body);
-            return Ok(PurchaseOutcome::MandateRejected { reason });
+            return Ok(PurchaseOutcome::MandateRejected {
+                reason: rejection_reason(body),
+            });
         }
 
         if !status.is_success() {
@@ -205,6 +259,14 @@ impl Client {
 
         Ok(PurchaseOutcome::Approved { result, settlement })
     }
+}
+
+/// The `error` field of a mandate guard `403`, or the raw body.
+fn rejection_reason(body: String) -> String {
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
+        .unwrap_or(body)
 }
 
 fn decode_settlement(header: &str) -> Option<Settlement> {

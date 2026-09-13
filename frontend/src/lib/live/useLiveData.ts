@@ -5,6 +5,7 @@ import type { Receipt, Refusal, ServiceManifest } from '../gateway/types'
 import type { LiveSnapshot, SourceKey } from './adapter'
 import { loadTree } from './ens'
 import { readAccount, readTopic } from './hedera'
+import { getProviders, type ProviderEntry } from './runner'
 
 function message(error: unknown): string {
   if (error instanceof Error) return (error as Error & { shortMessage?: string }).shortMessage ?? error.message
@@ -48,6 +49,8 @@ export function useLiveData(enabled: boolean) {
   const inFlight = useRef<Promise<void> | null>(null)
   const last = useRef<LiveSnapshot | null>(null)
   const gateway = useRef({ failures: 0, retryAt: 0, error: undefined as string | undefined })
+  // The runner is optional too; it only lists providers here. Same backoff.
+  const runner = useRef({ failures: 0, retryAt: 0 })
 
   /** `force` retries the gateway even while it's backing off. */
   const refresh = useCallback(async (force = false) => {
@@ -60,10 +63,24 @@ export function useLiveData(enabled: boolean) {
       const g = gateway.current
       const askGateway = config.gatewayEnabled && (force || Date.now() >= g.retryAt)
 
-      const [ens, gw] = await Promise.allSettled([
+      const r = runner.current
+      const askRunner = config.runnerEnabled && (force || Date.now() >= r.retryAt)
+
+      const [ens, gw, listed] = await Promise.allSettled([
         loadTree(),
         askGateway ? readGateway() : Promise.resolve(null),
+        askRunner ? getProviders() : Promise.resolve(null),
       ])
+      let providers: ProviderEntry[] | undefined = prev?.providers
+      if (listed.status === 'fulfilled' && listed.value) {
+        providers = listed.value
+        r.failures = 0
+        r.retryAt = 0
+      } else if (listed.status === 'rejected') {
+        r.failures += 1
+        r.retryAt = Date.now() + Math.min(config.pollMs * 2 ** r.failures, GATEWAY_BACKOFF_CAP_MS)
+        providers = undefined
+      }
       if (ens.status === 'rejected') errors.ens = message(ens.reason)
 
       let round: GatewayRound | null = null
@@ -99,6 +116,7 @@ export function useLiveData(enabled: boolean) {
         topic: topic.status === 'fulfilled' ? topic.value : (prev?.topic ?? []),
         topicId,
         payer: payer.status === 'fulfilled' ? payer.value : prev?.payer,
+        providers,
         errors,
         fetchedAt: Date.now(),
       }

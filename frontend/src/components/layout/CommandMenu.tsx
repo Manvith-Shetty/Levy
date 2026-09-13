@@ -17,10 +17,13 @@ export function CommandMenu({
   open,
   onClose,
   onCreateAgent,
+  onRunAgent,
 }: {
   open: boolean
   onClose: () => void
   onCreateAgent: () => void
+  /** Only in live mode, where there's a real agent runner to call. */
+  onRunAgent?: () => void
 }) {
   const navigate = useNavigate()
   const { agents, events, policies } = useLeash()
@@ -54,6 +57,17 @@ export function CommandMenu({
       },
       { id: 'act-activity', group: 'Actions', label: 'View Activity', run: go('/activity') },
     ]
+    if (onRunAgent) {
+      list.splice(1, 0, {
+        id: 'act-run',
+        group: 'Actions',
+        label: 'Run a paid request',
+        run: () => {
+          onClose()
+          onRunAgent()
+        },
+      })
+    }
 
     for (const agent of agents) {
       list.push({
@@ -88,7 +102,7 @@ export function CommandMenu({
 
     const order = ['Agents', 'Transactions', 'Policies', 'Actions']
     return list.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group))
-  }, [agents, events, policies, navigate, onClose, onCreateAgent])
+  }, [agents, events, policies, navigate, onClose, onCreateAgent, onRunAgent])
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase()

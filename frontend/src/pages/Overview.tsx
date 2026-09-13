@@ -4,6 +4,7 @@ import { useUI } from '../app/ui'
 import { portfolioTotals, rootAgents } from '../lib/selectors'
 import { money, moneyExact, percent } from '../lib/utils'
 import { PageHeader } from '../components/layout/PageHeader'
+import { config } from '../lib/config'
 import { Button } from '../components/common/Button'
 import { Card } from '../components/common/Card'
 import { Kpi } from '../components/common/Kpi'
@@ -30,10 +31,15 @@ export function Overview() {
         title="Overview"
         subtitle="Monitor your agent spending authority and infrastructure activity."
         action={
-          <Button variant="primary" onClick={() => ui.openCreate()}>
-            <IconPlus className="h-3.5 w-3.5" />
-            Create Agent
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {live.active && config.runnerEnabled && (
+              <Button onClick={() => ui.openRun()}>Run a paid request</Button>
+            )}
+            <Button variant="primary" onClick={() => ui.openCreate()}>
+              <IconPlus className="h-3.5 w-3.5" />
+              Create Agent
+            </Button>
+          </div>
         }
       />
 

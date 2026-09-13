@@ -32,13 +32,13 @@ import { SpendingChart } from '../components/spending/SpendingChart'
 import { ActivityFeed } from '../components/activity/ActivityFeed'
 import { IconArrowLeft, IconPlus } from '../components/layout/icons'
 import { RevokeOrRestore } from '../components/agents/AgentActions'
-import { etherscanUrl } from '../lib/config'
+import { config, etherscanUrl } from '../lib/config'
 
 type Tab = 'overview' | 'spending' | 'permissions' | 'children' | 'activity'
 
 export function AgentDetail() {
   const { id = '' } = useParams()
-  const { index, events } = useLeash()
+  const { index, events, live } = useLeash()
   const ui = useUI()
   const [tab, setTab] = useState<Tab>('overview')
 
@@ -98,7 +98,12 @@ export function AgentDetail() {
             )}
           </div>
         </div>
-        <RevokeOrRestore agent={agent} status={status} onRevoke={ui.openRevoke} />
+        <div className="flex flex-wrap gap-2">
+          {live.active && config.runnerEnabled && agent.parentId && (
+            <Button onClick={() => ui.openRun(agent.id)}>Run agent</Button>
+          )}
+          <RevokeOrRestore agent={agent} status={status} onRevoke={ui.openRevoke} />
+        </div>
       </header>
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">

@@ -8,6 +8,8 @@ interface UIState {
   agentDrawer: Agent | null
   eventDrawer: ActivityEvent | null
   commandOpen: boolean
+  runOpen: boolean
+  runAgentId?: string
 }
 
 interface UIActions {
@@ -20,6 +22,8 @@ interface UIActions {
   openEvent: (event: ActivityEvent) => void
   closeEvent: () => void
   setCommandOpen: (open: boolean) => void
+  openRun: (agentId?: string) => void
+  closeRun: () => void
 }
 
 const UIContext = createContext<(UIState & UIActions) | null>(null)
@@ -31,6 +35,7 @@ export function UIProvider({ children }: { children: ReactNode }) {
     agentDrawer: null,
     eventDrawer: null,
     commandOpen: false,
+    runOpen: false,
   })
 
   const openCreate = useCallback((parentId?: string) => {
@@ -44,6 +49,11 @@ export function UIProvider({ children }: { children: ReactNode }) {
   const openEvent = useCallback((event: ActivityEvent) => setState((s) => ({ ...s, eventDrawer: event })), [])
   const closeEvent = useCallback(() => setState((s) => ({ ...s, eventDrawer: null })), [])
   const setCommandOpen = useCallback((commandOpen: boolean) => setState((s) => ({ ...s, commandOpen })), [])
+  const openRun = useCallback(
+    (runAgentId?: string) => setState((s) => ({ ...s, runOpen: true, runAgentId })),
+    [],
+  )
+  const closeRun = useCallback(() => setState((s) => ({ ...s, runOpen: false })), [])
 
   const value = useMemo(
     () => ({
@@ -57,6 +67,8 @@ export function UIProvider({ children }: { children: ReactNode }) {
       openEvent,
       closeEvent,
       setCommandOpen,
+      openRun,
+      closeRun,
     }),
     [
       state,
@@ -69,6 +81,8 @@ export function UIProvider({ children }: { children: ReactNode }) {
       openEvent,
       closeEvent,
       setCommandOpen,
+      openRun,
+      closeRun,
     ],
   )
 
