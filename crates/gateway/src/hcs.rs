@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use hedera::{AccountId, Client, PrivateKey, TopicId, TopicMessageSubmitTransaction};
-use meter::{Receipt, Refusal, ServiceAnnouncement, Usage};
+use meter::{ComputeEvent, Receipt, Refusal, ServiceAnnouncement, Usage};
 use r402_protocol::payment::SettleResponse;
 use r402_server::{ResourceServerHooks, SettleResultContext};
 use tokio::sync::mpsc;
@@ -125,6 +125,8 @@ pub enum HcsMessage {
     Refusal(Refusal),
     /// This provider registering itself for discovery.
     Announce(ServiceAnnouncement),
+    /// A compute resource ending.
+    Teardown(ComputeEvent),
 }
 
 impl HcsMessage {
@@ -133,6 +135,7 @@ impl HcsMessage {
             Self::Receipt(receipt) => serde_json::to_vec(receipt),
             Self::Refusal(refusal) => serde_json::to_vec(refusal),
             Self::Announce(announcement) => serde_json::to_vec(announcement),
+            Self::Teardown(event) => serde_json::to_vec(event),
         }
     }
 
@@ -141,6 +144,7 @@ impl HcsMessage {
             Self::Receipt(receipt) => &receipt.quote_id,
             Self::Refusal(refusal) => &refusal.quote_id,
             Self::Announce(announcement) => &announcement.provider,
+            Self::Teardown(event) => &event.resource,
         }
     }
 
@@ -149,6 +153,7 @@ impl HcsMessage {
             Self::Receipt(_) => "receipt",
             Self::Refusal(_) => "refusal",
             Self::Announce(_) => "announcement",
+            Self::Teardown(_) => "teardown",
         }
     }
 }
@@ -200,8 +205,9 @@ pub fn spawn_publisher(
 
 /// This provider's registration, as published to the topic.
 #[must_use]
-pub fn announcement(cfg: &Config) -> ServiceAnnouncement {
+pub fn announcement(cfg: &Config, per_minute: Option<u64>) -> ServiceAnnouncement {
     ServiceAnnouncement {
+        per_minute,
         kind: "leash.service.announce.v1".into(),
         provider: cfg.provider.clone(),
         category: cfg.category.clone(),
@@ -282,6 +288,7 @@ impl ResourceServerHooks for ReceiptHook {
                 input_tokens: 0,
                 output_tokens: 0,
             });
+            let resource = quote.as_ref().and_then(|q| q.resource.clone());
             let mandate_path = quote.and_then(|q| q.mandate_path).unwrap_or_default();
 
             let receipt = Receipt {
@@ -298,6 +305,7 @@ impl ResourceServerHooks for ReceiptHook {
                 settled_at: now_rfc3339(),
                 mandate_path,
                 service: Some(self.category.clone()),
+                resource,
             };
             self.ledger.record(&receipt).await;
 

@@ -62,7 +62,7 @@ pub enum PurchaseOutcome {
     /// Paid and served.
     Approved {
         /// The gated response.
-        result: InferResponse,
+        result: Box<InferResponse>,
         /// Settlement details, when the gateway returned a `payment-response`
         /// header.
         settlement: Option<Settlement>,
@@ -273,7 +273,10 @@ impl Client {
         let result: InferResponse = serde_json::from_str(&body)
             .with_context(|| format!("unexpected response body: {body}"))?;
 
-        Ok(PurchaseOutcome::Approved { result, settlement })
+        Ok(PurchaseOutcome::Approved {
+            result: Box::new(result),
+            settlement,
+        })
     }
 }
 

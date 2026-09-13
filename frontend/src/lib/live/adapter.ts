@@ -176,6 +176,7 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
       source,
       hcsSequence: sequence,
       category: receipt.service,
+      resource: receipt.resource,
     })
   }
 
@@ -197,6 +198,29 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
       source,
       hcsSequence: sequence,
       category: refusal.service,
+    })
+  }
+
+  // --- Compute teardowns --------------------------------------------------------
+  const TEARDOWN_REASON: Record<string, string> = {
+    expired: 'its prepaid time ran out',
+    revoked: "its agent's authority was revoked",
+    stopped: 'the owner stopped it',
+  }
+  for (const entry of snapshot.topic) {
+    if (entry.kind !== 'teardown') continue
+    const t = entry.body
+    events.push({
+      id: `tdwn_${t.resource}_${entry.sequence}`,
+      kind: 'compute.stopped',
+      agentId: t.agent,
+      service: t.provider,
+      resource: t.resource,
+      reason: TEARDOWN_REASON[t.reason] ?? t.reason,
+      timestamp: t.at || entry.consensusAt,
+      network: 'hedera-testnet',
+      source: 'hcs',
+      hcsSequence: entry.sequence,
     })
   }
 
@@ -352,6 +376,8 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
     connected: boolean
     registeredVia: 'hcs' | 'configured' | 'gateway'
     announcedAt?: string
+    compute?: { per_minute: number; max_minutes?: number; images?: string[]; limits?: string }
+    ops?: { project: string; per_action: number; actions: string[]; services: string[] }
   }
   const listings = new Map<string, Listing>()
   const announced = new Map<string, string>()
@@ -378,6 +404,8 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
     connected,
     registeredVia: announced.has(m.provider) ? 'hcs' : via,
     announcedAt: announced.get(m.provider),
+    compute: m.compute,
+    ops: m.ops,
   })
   if (manifest) listings.set(manifest.provider, fromManifest(manifest, !snapshot.errors.gateway, 'gateway'))
   for (const entry of snapshot.providers ?? []) {
@@ -385,8 +413,15 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
       listings.set(entry.manifest.provider, fromManifest(entry.manifest, true, entry.source ?? 'configured'))
     }
   }
+  // An address belongs to whoever announced on it last (the topic is read
+  // newest first), so a provider replaced on the same port drops out.
+  const claimed = new Set([...listings.values()].map((l) => l.base_url.replace(/\/$/, '')))
   for (const entry of snapshot.topic) {
-    if (entry.kind !== 'announce' || listings.has(entry.body.provider)) continue
+    if (entry.kind !== 'announce') continue
+    const url = entry.body.base_url.replace(/\/$/, '')
+    if (claimed.has(url)) continue
+    claimed.add(url)
+    if (listings.has(entry.body.provider)) continue
     const a = entry.body
     const decimals = a.asset === TREE_ASSET.symbol ? TREE_ASSET.decimals : a.asset === 'HBAR' ? 8 : 6
     listings.set(a.provider, {
@@ -401,6 +436,7 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
       connected: false,
       registeredVia: 'hcs',
       announcedAt: a.announced_at || entry.consensusAt,
+      compute: a.per_minute != null ? { per_minute: a.per_minute } : undefined,
     })
   }
 
@@ -430,7 +466,20 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
           description: l.description,
           model: l.model,
           kind: l.category,
-          pricing: perJob
+          pricing: l.ops
+            ? [
+                `${price(l.ops.per_action)} per repair`,
+                `Repairs: ${l.ops.actions.join(', ')}`,
+                `Stack: ${l.ops.project} (${l.ops.services.join(', ')})`,
+              ]
+            : l.compute
+            ? [
+                `${price(l.compute.per_minute)} per minute, prepaid`,
+                ...(l.compute.max_minutes ? [`Up to ${l.compute.max_minutes} min per purchase`] : []),
+                ...(l.compute.images?.length ? [`Images: ${l.compute.images.join(', ')}`] : []),
+                ...(l.compute.limits ? [`Each container: ${l.compute.limits}`] : []),
+              ]
+            : perJob
             ? [`${price(l.pricing.minimum)} per call`]
             : [
                 `${price(l.pricing.per_1k_input)} / 1K input tokens`,

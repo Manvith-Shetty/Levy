@@ -101,13 +101,171 @@ pub struct ServiceManifest {
     pub receipts_topic: Option<String>,
     /// x402 protocol version.
     pub x402_version: u8,
-    /// What kind of service this is (`inference`, `compute`, `data`) — the
+    /// What kind of service this is (`inference`, `compute`, `ops`, `data`) — the
     /// value an agent's `allowedServices` record is checked against.
     #[serde(default = "default_category")]
     pub category: String,
     /// One line describing what's sold.
     #[serde(default)]
     pub description: String,
+    /// For compute providers: what can be run and what a minute costs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeOffer>,
+    /// For ops providers: the stack they run and the repairs they sell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<OpsOffer>,
+}
+
+/// What an ops provider sells: repair actions on one Docker Compose stack,
+/// a flat price each. Only these actions, only on these services — an agent
+/// can't buy a shell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpsOffer {
+    /// Compose project name.
+    pub project: String,
+    /// Atomic units per action.
+    pub per_action: u64,
+    /// Actions for sale: `start`, `restart`, `unpause`, `recreate`.
+    pub actions: Vec<String>,
+    /// Services of the stack, in dependency order (dependencies first).
+    pub services: Vec<String>,
+    /// What each service does and depends on, for whoever diagnoses it.
+    #[serde(default)]
+    pub topology: String,
+}
+
+/// One repair to price and run: `action` on `service`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpsAction {
+    pub action: String,
+    pub service: String,
+}
+
+/// One service of the stack, as Docker sees it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceHealth {
+    pub name: String,
+    /// `running`, `exited`, `paused`, `restarting`, `missing`.
+    pub state: String,
+    /// Docker healthcheck: `healthy`, `unhealthy`, `starting`, or empty.
+    #[serde(default)]
+    pub health: String,
+    /// Docker's own summary, e.g. `Exited (137) 4 seconds ago`.
+    #[serde(default)]
+    pub status: String,
+    /// Last lines of output, when the stack isn't healthy.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub logs: String,
+}
+
+/// The end-to-end check: what a customer of the stack would see.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Probe {
+    pub url: String,
+    /// HTTP status, when there was an answer.
+    pub status: Option<u16>,
+    pub ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The whole stack at one moment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfraHealth {
+    pub project: String,
+    /// Every service running and healthy, and the probe answering 200.
+    pub healthy: bool,
+    pub services: Vec<ServiceHealth>,
+    pub probe: Probe,
+    /// What's wrong, one line each; empty when healthy.
+    pub problems: Vec<String>,
+    /// RFC 3339.
+    pub checked_at: String,
+}
+
+/// What a paid repair did.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpsResult {
+    pub action: String,
+    pub service: String,
+    /// The command that ran, e.g. `docker compose start cache`.
+    pub command: String,
+    /// Its output.
+    pub output: String,
+    /// The stack after the repair settled (or after waiting for it to).
+    pub health: InfraHealth,
+}
+
+/// What a compute provider rents out: containers from an allowlist of
+/// images, billed per minute, prepaid, torn down when the time runs out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputeOffer {
+    /// Atomic units per minute of runtime.
+    pub per_minute: u64,
+    /// Longest a single purchase (or extension) can run.
+    pub max_minutes: u64,
+    /// Images a job may use.
+    pub images: Vec<String>,
+    /// CPU and memory each container gets, e.g. `0.5 CPU, 256 MB`.
+    pub limits: String,
+}
+
+/// A compute job to price: run `command` in `image` for `minutes`, or add
+/// `minutes` to a running resource (`extend`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobSpec {
+    /// Container image, from the provider's allowlist.
+    #[serde(default)]
+    pub image: String,
+    /// Shell command the container runs (`sh -c`). Empty keeps the image's
+    /// default command.
+    #[serde(default)]
+    pub command: String,
+    /// Prepaid runtime.
+    pub minutes: u64,
+    /// Id of a running resource to extend instead of starting a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend: Option<String>,
+}
+
+/// A container a compute provider is running for an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputeResource {
+    /// Container id (short).
+    pub id: String,
+    /// Container name.
+    pub name: String,
+    /// Agent that paid for it.
+    pub agent: String,
+    pub image: String,
+    pub command: String,
+    /// RFC 3339.
+    pub started_at: String,
+    /// RFC 3339: when the prepaid time runs out and it's torn down.
+    pub expires_at: String,
+    /// `running`, `exited`, `stopped`.
+    pub status: String,
+    /// Quotes that paid for its time, first to last.
+    pub paid_by: Vec<String>,
+    /// Last lines of output.
+    #[serde(default)]
+    pub logs: String,
+}
+
+/// A compute resource ending, published to HCS so a teardown is as
+/// auditable as the payment that started it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputeEvent {
+    /// Schema marker, `leash.compute.teardown.v1`.
+    pub kind: String,
+    pub provider: String,
+    pub resource: String,
+    pub agent: String,
+    /// `expired` (prepaid time ran out), `revoked` (the agent's authority
+    /// is gone) or `stopped` (the owner stopped it).
+    pub reason: String,
+    /// RFC 3339.
+    pub at: String,
 }
 
 fn default_category() -> String {
@@ -137,6 +295,9 @@ pub struct ServiceAnnouncement {
     pub pricing: PriceModel,
     /// RFC 3339 time of the announcement.
     pub announced_at: String,
+    /// Compute providers: atomic units per minute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_minute: Option<u64>,
 }
 
 /// Body of `POST /v1/quote`.
@@ -147,6 +308,12 @@ pub struct QuoteRequest {
     /// Upper bound on generated tokens, which the quote charges for.
     #[serde(default = "default_max_output")]
     pub max_output_tokens: u64,
+    /// Compute providers price a job instead of a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobSpec>,
+    /// Ops providers price a repair instead of a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<OpsAction>,
 }
 
 fn default_max_output() -> u64 {
@@ -204,6 +371,12 @@ pub struct InferResponse {
     pub charged: u64,
     /// Atomic units the buyer paid for but did not consume.
     pub unused_output_credit: u64,
+    /// Compute providers: the container this payment started or extended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<ComputeResource>,
+    /// Ops providers: the repair this payment ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<OpsResult>,
 }
 
 /// One node the mandate guard walked through on the way from an agent to the
@@ -253,6 +426,10 @@ pub struct Receipt {
     /// Service category bought.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
+    /// Compute: the container this payment started or extended. Ops: the
+    /// repair it paid for, e.g. `start cache`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
 }
 
 /// One payment the mandate guard refused, before any price tag was issued.

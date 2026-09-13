@@ -1,0 +1,50 @@
+# A small shop for Leash's agents to keep alive: a web front end, an API
+# and a Redis cache. The ops provider (a gateway with OPS_COMPOSE_FILE set
+# to this file) sells repair actions on it; scripts/demo-providers.sh
+# starts both.
+#
+#   docker compose -f demo/shop/docker-compose.yaml up -d
+#   open http://localhost:8088
+#
+# Nothing restarts on its own (restart: "no"), so an outage stays an
+# outage until an agent pays to fix it.
+name: leash-shop
+
+services:
+  cache:
+    image: redis:7-alpine
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 2
+
+  api:
+    image: python:3.12-alpine
+    restart: "no"
+    command: ["python", "-u", "/app/api.py"]
+    volumes: ["./api.py:/app/api.py:ro"]
+    environment:
+      REDIS_HOST: cache
+    depends_on: [cache]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 2
+
+  web:
+    image: python:3.12-alpine
+    restart: "no"
+    command: ["python", "-u", "/app/web.py"]
+    volumes: ["./web.py:/app/web.py:ro"]
+    environment:
+      API_URL: http://api:8000
+    ports: ["8088:8080"]
+    depends_on: [api]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 2

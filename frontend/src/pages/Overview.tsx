@@ -91,9 +91,11 @@ export function Overview() {
           )}
           {ready && roots.length === 0 && (
             <p className="copy px-3 py-12 text-center text-[13px] text-muted">
-              {live.active
-                ? 'No agents found under the configured top registry. Check VITE_ENS_TOP_REGISTRY and VITE_ENS_FROM_BLOCK.'
-                : 'No agents yet. Create one to start delegating authority.'}
+              {!live.active
+                ? 'No agents yet. Create one to start delegating authority.'
+                : live.errors.ens
+                  ? `Couldn't read the agent tree from Sepolia: ${live.errors.ens}`
+                  : 'No agents found under the configured top registry. Check VITE_ENS_TOP_REGISTRY and VITE_ENS_FROM_BLOCK.'}
             </p>
           )}
           {ready && roots.map((root) => (

@@ -192,6 +192,7 @@ mod tests {
                 })
                 .collect(),
             service: None,
+            resource: None,
         }
     }
 

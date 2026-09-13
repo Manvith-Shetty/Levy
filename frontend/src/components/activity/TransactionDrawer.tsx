@@ -52,9 +52,11 @@ export function TransactionDrawer({
             ? event.kind === 'agent.revoked'
               ? '✕ REVOKED'
               : '✕ BLOCKED'
-            : neutral
-              ? '✓ CONFIRMED ON-CHAIN'
-              : '✓ APPROVED'}
+            : event.kind === 'compute.stopped'
+              ? '■ CONTAINER REMOVED'
+              : neutral
+                ? '✓ CONFIRMED ON-CHAIN'
+                : '✓ APPROVED'}
         </p>
         {event.amount != null && (
           <p
@@ -135,6 +137,11 @@ export function TransactionDrawer({
             <Link to={`/agents/${target.id}`} className="underline-offset-4 hover:underline">
               {target.name}
             </Link>
+          </Row>
+        )}
+        {event.resource && (
+          <Row label={event.category === 'ops' ? 'Repair' : 'Container'}>
+            <span className="font-mono text-[12.5px]">{event.resource}</span>
           </Row>
         )}
         {event.service && (

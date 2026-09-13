@@ -7,12 +7,13 @@
  */
 
 import { config } from '../config'
-import type { Receipt, Refusal, ServiceAnnouncement } from '../gateway/types'
+import type { ComputeEvent, Receipt, Refusal, ServiceAnnouncement } from '../gateway/types'
 
 export type TopicEntry =
   | { kind: 'receipt'; sequence: number; consensusAt: string; body: Receipt }
   | { kind: 'refusal'; sequence: number; consensusAt: string; body: Refusal }
   | { kind: 'announce'; sequence: number; consensusAt: string; body: ServiceAnnouncement }
+  | { kind: 'teardown'; sequence: number; consensusAt: string; body: ComputeEvent }
 
 interface MirrorMessage {
   consensus_timestamp: string
@@ -61,6 +62,8 @@ export async function readTopic(topicId: string, maxPages = 5): Promise<TopicEnt
         out.push({ ...base, kind: 'refusal', body: body as Refusal })
       } else if (kind.startsWith('leash.service.announce')) {
         out.push({ ...base, kind: 'announce', body: body as ServiceAnnouncement })
+      } else if (kind.startsWith('leash.compute.teardown')) {
+        out.push({ ...base, kind: 'teardown', body: body as ComputeEvent })
       }
     }
     path = data.links?.next ?? null

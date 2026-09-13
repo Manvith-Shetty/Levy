@@ -6,6 +6,7 @@ import { cx, money } from '../../lib/utils'
 import {
   IconActivity,
   IconAgents,
+  IconAutopilot,
   IconOverview,
   IconPolicies,
   IconServices,
@@ -16,6 +17,7 @@ const NAV = [
   { to: '/', label: 'Overview', Icon: IconOverview, end: true },
   { to: '/agents', label: 'Agents', Icon: IconAgents },
   { to: '/services', label: 'Services', Icon: IconServices },
+  { to: '/autopilot', label: 'Autopilot', Icon: IconAutopilot },
   { to: '/policies', label: 'Policies', Icon: IconPolicies },
   { to: '/activity', label: 'Activity', Icon: IconActivity },
   { to: '/settings', label: 'Settings', Icon: IconSettings },

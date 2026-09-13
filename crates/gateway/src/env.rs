@@ -137,7 +137,8 @@ fn upstream_from_env() -> Option<Upstream> {
 /// Default one-liner for a service category.
 fn describe(category: &str) -> &'static str {
     match category {
-        "compute" => "GPU compute, billed per job",
+        "compute" => "Containers, prepaid by the minute and removed when the time runs out",
+        "ops" => "Repairs on a running Docker Compose stack, priced per action",
         "data" => "Metered data feed, priced per query",
         _ => "LLM inference, priced per token",
     }

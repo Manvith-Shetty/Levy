@@ -17,6 +17,8 @@ use axum::Router;
 use axum::routing::{get, post};
 use gateway::env::{Config, MandateMode};
 use gateway::hcs::{self, ReceiptHook, ReceiptLog};
+use gateway::compute::Broker;
+use gateway::ops::Ops;
 use gateway::ledger::SpendLedger;
 use gateway::mandate_guard::{self, AnyResolver};
 use gateway::quotes::QuoteStore;
@@ -78,8 +80,36 @@ async fn main() -> Result<()> {
 
     // Register on the topic, so agents can discover this provider by
     // replaying it. Once per start; the manifest stays the live source.
+    // Compute: rent containers when COMPUTE_BACKEND=docker. Default price:
+    // 1/5000 of a unit per minute ($0.0002 in USDC).
+    let broker = Broker::from_env(
+        &cfg.provider,
+        10_u64.pow(u32::from(cfg.asset.decimals)) / 5_000,
+        hcs_tx.clone(),
+    )
+    .map(Arc::new);
+    if let Some(broker) = &broker {
+        broker.adopt().await;
+        tracing::info!(offer = ?broker.offer(), "selling compute (Docker)");
+    }
+
+    // Ops: repairs on a Compose stack when OPS_COMPOSE_FILE is set. Default
+    // price: 1/2000 of a unit per action ($0.0005 in USDC).
+    let ops = Ops::from_env(10_u64.pow(u32::from(cfg.asset.decimals)) / 2_000)
+        .await?
+        .map(Arc::new);
+    if let Some(ops) = &ops {
+        match ops.up().await {
+            Ok(_) => tracing::info!(offer = ?ops.offer(), "selling repairs on the stack (it's up)"),
+            Err(error) => tracing::warn!(%error, "could not bring the stack up"),
+        }
+    }
+
     if let Some(tx) = &hcs_tx
-        && let Err(error) = tx.send(hcs::HcsMessage::Announce(hcs::announcement(&cfg)))
+        && let Err(error) = tx.send(hcs::HcsMessage::Announce(hcs::announcement(
+            &cfg,
+            broker.as_ref().map(|b| b.offer().per_minute),
+        )))
     {
         tracing::warn!(%error, "could not queue the service announcement");
     }
@@ -130,7 +160,7 @@ async fn main() -> Result<()> {
                 )]
             }
         })?
-        .with_description("Metered LLM inference, priced per token".into());
+        .with_description(cfg.description.clone());
 
     let state = AppState {
         config: Arc::clone(&cfg),
@@ -140,7 +170,13 @@ async fn main() -> Result<()> {
         mandate,
         mandate_mock,
         ledger,
+        broker: broker.clone(),
+        ops,
     };
+
+    if let Some(broker) = broker {
+        broker.spawn_reaper(state.mandate.clone(), std::time::Duration::from_secs(20));
+    }
 
     // `.layer()` calls stack outermost-last, so the mandate guard — applied
     // last — runs before the x402 paid layer, matching the model: mandate
@@ -151,6 +187,11 @@ async fn main() -> Result<()> {
         .route("/v1/receipts", get(routes::receipts))
         .route("/v1/refusals", get(routes::refusals))
         .route("/v1/authorize", post(routes::authorize))
+        .route("/v1/resources", get(routes::resources))
+        .route("/v1/resources/{id}/stop", post(routes::stop_resource))
+        .route("/v1/ops/health", get(routes::ops_health))
+        .route("/v1/ops/scenarios", get(routes::ops_scenarios))
+        .route("/v1/ops/chaos", post(routes::ops_chaos))
         .route(
             "/v1/infer",
             post(routes::infer).layer(paid_layer).layer(

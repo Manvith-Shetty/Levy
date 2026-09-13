@@ -165,13 +165,24 @@ async function timestampsFor(blocks: bigint[]): Promise<void> {
   )
 }
 
+/**
+ * RPCs to read the tree's logs from, in order: the configured one, then
+ * public Sepolia endpoints known to serve `eth_getLogs` over wide ranges to
+ * browsers. Some nodes answer with no logs at all (publicnode has, for
+ * hours at a time), which looks exactly like an empty tree.
+ */
+const LOG_RPCS = [...new Set([config.sepoliaRpcUrl, 'https://sepolia.gateway.tenderly.co', 'https://ethereum-sepolia-rpc.publicnode.com'])]
+const logClients = LOG_RPCS.map((url) => createPublicClient({ chain: sepolia, transport: http(url, { batch: true }) }))
+/** The RPC that last returned the tree, tried first next time. */
+let logClient = 0
+
 /** Public RPCs cap eth_getLogs ranges; page through in fixed windows. */
 async function logsFor(addresses: Address[], toBlock: bigint): Promise<Log[]> {
   const WINDOW = 45_000n
   const out: Log[] = []
   for (let from = config.fromBlock; from <= toBlock; from += WINDOW + 1n) {
     const to = from + WINDOW > toBlock ? toBlock : from + WINDOW
-    out.push(...(await client.getLogs({ address: addresses, fromBlock: from, toBlock: to })))
+    out.push(...(await logClients[logClient].getLogs({ address: addresses, fromBlock: from, toBlock: to })))
   }
   return out
 }
@@ -207,7 +218,9 @@ interface LabelEntry {
 }
 
 export async function loadTree(): Promise<EnsSnapshot> {
-  const latestBlock = await client.getBlockNumber()
+  // A few blocks behind the head: public RPCs load-balance across nodes, and
+  // one that's a block behind can answer a range past its head with no logs.
+  const latestBlock = (await client.getBlockNumber()) - 3n
   const top = addr(config.topRegistry)
   const registrar = addr(config.registrar)
 
@@ -222,7 +235,19 @@ export async function loadTree(): Promise<EnsSnapshot> {
   let frontier: Address[] = [top]
   for (let depth = 0; frontier.length > 0 && depth < 8; depth++) {
     frontier.forEach((r) => seen.add(lc(r)))
-    const logs = await logsFor(frontier, latestBlock)
+    let logs = await logsFor(frontier, latestBlock).catch(() => [] as Log[])
+    // The top registry always has events; none means an RPC that doesn't
+    // serve them, not an empty tree. Try the others, then fail the load so
+    // the last tree read stays on screen.
+    for (let tried = 1; depth === 0 && logs.length === 0 && tried < logClients.length; tried++) {
+      logClient = (logClient + 1) % logClients.length
+      logs = await logsFor(frontier, latestBlock).catch(() => [] as Log[])
+    }
+    if (depth === 0 && logs.length === 0) {
+      throw new Error(
+        `No Sepolia RPC returned events for the top registry ${config.topRegistry} (tried ${LOG_RPCS.map((u) => new URL(u).host).join(', ')}). The next refresh retries.`,
+      )
+    }
     const next: Address[] = []
 
     for (const log of logs) {

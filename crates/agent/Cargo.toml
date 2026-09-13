@@ -14,7 +14,7 @@ path = "src/bin/associate_token.rs"
 
 [[bin]]
 name = "agent-runner"
-path = "src/bin/agent_runner.rs"
+path = "src/bin/agent_runner/main.rs"
 
 [dependencies]
 common = { workspace = true }

@@ -10,6 +10,7 @@ import { Activity } from './pages/Activity'
 import { Policies } from './pages/Policies'
 import { Services } from './pages/Services'
 import { Settings } from './pages/Settings'
+import { Autopilot } from './pages/Autopilot'
 
 export default function App() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
                 <Route path="activity" element={<Activity />} />
                 <Route path="policies" element={<Policies />} />
                 <Route path="services" element={<Services />} />
+                <Route path="autopilot" element={<Autopilot />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>

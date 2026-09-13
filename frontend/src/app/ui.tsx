@@ -10,6 +10,15 @@ interface UIState {
   commandOpen: boolean
   runOpen: boolean
   runAgentId?: string
+  runPreset?: RunPreset
+}
+
+/** Opens the run modal pre-filled, e.g. to add time to a running container. */
+export interface RunPreset {
+  service: string
+  prompt?: string
+  job?: import('../lib/live/runner').JobSpec
+  provider?: string
 }
 
 interface UIActions {
@@ -22,7 +31,7 @@ interface UIActions {
   openEvent: (event: ActivityEvent) => void
   closeEvent: () => void
   setCommandOpen: (open: boolean) => void
-  openRun: (agentId?: string) => void
+  openRun: (agentId?: string, preset?: RunPreset) => void
   closeRun: () => void
 }
 
@@ -50,7 +59,7 @@ export function UIProvider({ children }: { children: ReactNode }) {
   const closeEvent = useCallback(() => setState((s) => ({ ...s, eventDrawer: null })), [])
   const setCommandOpen = useCallback((commandOpen: boolean) => setState((s) => ({ ...s, commandOpen })), [])
   const openRun = useCallback(
-    (runAgentId?: string) => setState((s) => ({ ...s, runOpen: true, runAgentId })),
+    (runAgentId?: string, runPreset?: RunPreset) => setState((s) => ({ ...s, runOpen: true, runAgentId, runPreset })),
     [],
   )
   const closeRun = useCallback(() => setState((s) => ({ ...s, runOpen: false })), [])

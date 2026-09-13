@@ -29,6 +29,14 @@ export function IconAgents({ className }: { className?: string }) {
   )
 }
 
+export function IconAutopilot({ className }: { className?: string }) {
+  return (
+    <svg {...props} className={className} aria-hidden>
+      <path d="M1.5 8.5h2.8l1.6-4.5 3 8.5 1.8-4h3.8" />
+    </svg>
+  )
+}
+
 export function IconSpending({ className }: { className?: string }) {
   return (
     <svg {...props} className={className} aria-hidden>

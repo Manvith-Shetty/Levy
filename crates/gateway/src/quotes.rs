@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use meter::{MandateHop, Usage};
+use meter::{JobSpec, MandateHop, OpsAction, Usage};
 
 /// A quote's lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +37,12 @@ pub struct Quote {
     /// set once the mandate guard has passed it, read back by the settle
     /// hook to embed in the receipt.
     pub mandate_path: Option<Vec<MandateHop>>,
+    /// Compute quotes: the job that was priced.
+    pub job: Option<JobSpec>,
+    /// Compute quotes: the container the payment started or extended.
+    pub resource: Option<String>,
+    /// Ops quotes: the repair that was priced.
+    pub action: Option<OpsAction>,
     issued: Instant,
 }
 
@@ -107,9 +113,61 @@ impl QuoteStore {
                 state: State::Open,
                 usage: None,
                 mandate_path: None,
+                job: None,
+                resource: None,
+                action: None,
                 issued: Instant::now(),
             },
         );
+    }
+
+    /// Stores a priced compute job; redeemed by the same gated endpoint.
+    pub fn insert_job(&self, id: String, job: JobSpec, amount: u64) {
+        let mut quotes = self.lock();
+        quotes.retain(|_, q| !q.is_expired(self.ttl));
+        quotes.insert(
+            id,
+            Quote {
+                prompt: String::new(),
+                max_output_tokens: 0,
+                amount,
+                state: State::Open,
+                usage: None,
+                mandate_path: None,
+                job: Some(job),
+                resource: None,
+                action: None,
+                issued: Instant::now(),
+            },
+        );
+    }
+
+    /// Stores a priced repair; redeemed by the same gated endpoint.
+    pub fn insert_action(&self, id: String, action: OpsAction, amount: u64) {
+        let mut quotes = self.lock();
+        quotes.retain(|_, q| !q.is_expired(self.ttl));
+        quotes.insert(
+            id,
+            Quote {
+                prompt: String::new(),
+                max_output_tokens: 0,
+                amount,
+                state: State::Open,
+                usage: None,
+                mandate_path: None,
+                job: None,
+                resource: None,
+                action: Some(action),
+                issued: Instant::now(),
+            },
+        );
+    }
+
+    /// Records the container a compute payment started or extended.
+    pub fn record_resource(&self, id: &str, resource: String) {
+        if let Some(quote) = self.lock().get_mut(id) {
+            quote.resource = Some(resource);
+        }
     }
 
     /// Price of an open, unexpired quote — what the 402 will charge.

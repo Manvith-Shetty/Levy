@@ -19,6 +19,33 @@ export interface PriceModel {
   minimum: number
 }
 
+export interface JobSpec {
+  image: string
+  command: string
+  minutes: number
+  extend?: string
+}
+
+export interface ComputeResource {
+  id: string
+  name: string
+  agent: string
+  image: string
+  command: string
+  started_at: string
+  expires_at: string
+  status: string
+  paid_by: string[]
+  logs: string
+}
+
+export interface ComputeOffer {
+  per_minute: number
+  max_minutes: number
+  images: string[]
+  limits: string
+}
+
 export interface DiscoveredProvider {
   base_url: string
   source?: 'hcs' | 'configured'
@@ -38,6 +65,7 @@ export type RunStep =
     }
   | { step: 'discovered'; providers: DiscoveredProvider[] }
   | { step: 'no_provider'; service: string; unavailable?: boolean }
+  | { step: 'planned'; job: JobSpec; planner: string; note?: string | null }
   | {
       step: 'quote'
       base_url: string
@@ -76,6 +104,8 @@ export type RunStep =
       unused_output_credit: number
       asset: AssetInfo
       quote_id: string
+      resource?: ComputeResource | null
+      base_url?: string
     }
   | { step: 'audited'; topic: string; sequence: number; consensus_timestamp: string }
   | { step: 'audit_pending'; topic: string | null }
@@ -88,6 +118,8 @@ export interface RunnerInfo {
   max_atomic: number
   max_output_tokens: number
   requires_token: boolean
+  /** Model that turns compute tasks into jobs, when the runner has an HF token. */
+  planner?: string | null
 }
 
 export interface ProviderEntry {
@@ -97,6 +129,8 @@ export interface ProviderEntry {
   manifest?: {
     category?: string
     description?: string
+    compute?: ComputeOffer
+    ops?: { project: string; per_action: number; actions: string[]; services: string[] }
     provider: string
     model: string
     base_url: string
@@ -113,6 +147,10 @@ export interface ProviderEntry {
 export interface RunRequest {
   agent: string
   service?: string
+  /** Compute: an explicit job, or `extend` to add time to a resource. */
+  job?: JobSpec
+  /** Only shop at this provider (base URL). */
+  provider?: string
   prompt?: string
   max_output_tokens?: number
   budget_atomic?: number
@@ -144,6 +182,29 @@ export async function getRunner(signal?: AbortSignal): Promise<RunnerInfo> {
   const response = await fetch(url('/v1/runner'), { headers: headers(), signal })
   if (!response.ok) throw await failure(response)
   return (await response.json()) as RunnerInfo
+}
+
+export interface ProviderResources {
+  base_url: string
+  provider: string
+  resources: ComputeResource[] | null
+}
+
+/** Containers every discovered compute provider is running. */
+export async function getResources(signal?: AbortSignal): Promise<ProviderResources[]> {
+  const response = await fetch(url('/v1/resources'), { headers: headers(), signal })
+  if (!response.ok) throw await failure(response)
+  return ((await response.json()) as { providers: ProviderResources[] }).providers
+}
+
+/** The owner's kill switch for one container. */
+export async function stopResource(baseUrl: string, id: string): Promise<void> {
+  const response = await fetch(url('/v1/resources/stop'), {
+    method: 'POST',
+    headers: headers({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ base_url: baseUrl, id }),
+  })
+  if (!response.ok) throw await failure(response)
 }
 
 /** Every provider the runner shops across, with its manifest when it answered. */

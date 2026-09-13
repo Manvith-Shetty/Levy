@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { useToast } from '../../app/toast'
-import { useUI } from '../../app/ui'
+import { useUI, type RunPreset } from '../../app/ui'
 import { config, hashscanUrl } from '../../lib/config'
 import {
   fromAtomic,
   getRunner,
   readRequirements,
   runAgent,
+  type ComputeResource,
   type RunnerInfo,
   type RunStep,
 } from '../../lib/live/runner'
@@ -17,7 +19,12 @@ import { Label, MoneyInput, Select, Textarea } from '../common/Field'
 import { Modal, ModalFoot, ModalHead } from '../common/Modal'
 import { PolicyChecklist } from '../policy/PolicyChecklist'
 
-const DEFAULT_PROMPT = "Explain Hedera's hashgraph consensus in three sentences."
+/** A sensible first task per service, replaced once the owner types their own. */
+const DEFAULT_TASK: Record<string, string> = {
+  inference: "Explain Hedera's hashgraph consensus in three sentences.",
+  compute: 'Run a Redis cache for 10 minutes.',
+}
+const defaultTask = (service: string) => DEFAULT_TASK[service] ?? DEFAULT_TASK.inference
 
 type Of<K extends RunStep['step']> = Extract<RunStep, { step: K }>
 
@@ -25,6 +32,7 @@ interface Run {
   start?: Of<'start'>
   discovered?: Of<'discovered'>
   noProvider?: Of<'no_provider'>
+  planned?: Of<'planned'>
   quotes: Of<'quote'>[]
   failed: Of<'quote_failed'>[]
   overBudget?: Of<'over_budget'>
@@ -116,10 +124,13 @@ export function RunAgentModal({
   open,
   onClose,
   agentId,
+  preset,
 }: {
   open: boolean
   onClose: () => void
   agentId?: string
+  /** Pre-filled service and job, e.g. adding time to a running container. */
+  preset?: RunPreset
 }) {
   const { agents, events, services, live } = useLeash()
   const { push } = useToast()
@@ -136,8 +147,14 @@ export function RunAgentModal({
   const [picked, setPicked] = useState(agentId ?? '')
   // Agents may arrive after the first render; fall back until one is picked.
   const agent = choices.some((a) => a.id === picked) ? picked : fallback
-  const [service, setService] = useState('inference')
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT)
+  const [service, setServiceRaw] = useState(preset?.service ?? 'inference')
+  const [prompt, setPrompt] = useState(preset?.prompt ?? defaultTask(preset?.service ?? 'inference'))
+  const extending = preset?.job?.extend
+  // Switching service swaps the example task, but never what the owner typed.
+  const setService = (next: string) => {
+    if (prompt === defaultTask(service)) setPrompt(defaultTask(next))
+    setServiceRaw(next)
+  }
   const [cap, setCap] = useState<number | ''>('')
   const [runner, setRunner] = useState<RunnerInfo | null>(null)
   const [runnerError, setRunnerError] = useState<string | null>(null)
@@ -179,7 +196,7 @@ export function RunAgentModal({
     setRunning(true)
     try {
       await runAgent(
-        { agent, service, prompt: prompt.trim(), budget_atomic: capAtomic },
+        { agent, service, prompt: prompt.trim(), budget_atomic: capAtomic, job: preset?.job, provider: preset?.provider },
         (step) => {
           acc = reduce(acc, step)
           setRun(acc)
@@ -222,8 +239,12 @@ export function RunAgentModal({
     <Modal open={open} onClose={running ? () => undefined : onClose} width="max-w-2xl" labelledBy="run-agent-title">
       <ModalHead
         id="run-agent-title"
-        title="Give an agent a task"
-        hint="The agent finds a provider, gets quotes, and asks Leash whether it may pay. Only an approved payment settles over x402 on Hedera, from the shared agent wallet."
+        title={extending ? 'Add time to a container' : 'Give an agent a task'}
+        hint={
+          extending
+            ? 'More time is a new payment, so Leash checks the agent\'s policy again before anything is paid.'
+            : 'The agent finds a provider, gets quotes, and asks Leash whether it may pay. Only an approved payment settles over x402 on Hedera, from the shared agent wallet.'
+        }
         onClose={running ? () => undefined : onClose}
       />
 
@@ -317,6 +338,23 @@ export function RunAgentModal({
                 {run.noProvider && !run.noProvider.unavailable && (
                   <p className="mt-1 text-[12.5px] text-blocked">No provider sells {service} right now. Nothing was paid.</p>
                 )}
+                {run.planned && (
+                  <div className="mt-2 rounded-md border border-hairline bg-sunken px-3 py-2 text-[12.5px]">
+                    <p className="text-muted">
+                      {run.planned.planner === 'given'
+                        ? 'Job'
+                        : run.planned.planner === 'rules'
+                          ? 'Planned from the task (keyword rules)'
+                          : `Planned from the task by ${run.planned.planner}`}
+                    </p>
+                    <p className="mt-1 font-mono text-[12px] text-ink">
+                      {run.planned.job.extend
+                        ? `extend ${run.planned.job.extend} by ${run.planned.job.minutes} min`
+                        : `${run.planned.job.image} · ${run.planned.job.command || 'default command'} · ${run.planned.job.minutes} min`}
+                    </p>
+                    {run.planned.note && <p className="mt-1 text-[11.5px] text-warn">{run.planned.note}</p>}
+                  </div>
+                )}
               </Stage>
 
               <Stage
@@ -378,11 +416,17 @@ export function RunAgentModal({
                     </table>
                   </div>
                 )}
-                {run.quotes[0] && (
-                  <p className="mt-1.5 text-[12px] text-faint">
-                    Priced per token: {run.quotes[0].input_tokens} in, up to {run.quotes[0].max_output_tokens} out.
-                  </p>
-                )}
+                {run.quotes[0] &&
+                  (run.planned ? (
+                    <p className="mt-1.5 text-[12px] text-faint">
+                      Priced per minute: {run.quotes[0].max_output_tokens} min, prepaid. The container is removed when
+                      the time runs out.
+                    </p>
+                  ) : (
+                    <p className="mt-1.5 text-[12px] text-faint">
+                      Priced per token: {run.quotes[0].input_tokens} in, up to {run.quotes[0].max_output_tokens} out.
+                    </p>
+                  ))}
                 {run.failed.map((f) => (
                   <p key={f.base_url} className="mt-1 text-[12px] text-warn">
                     {f.base_url} didn't quote: {f.message}
@@ -500,7 +544,13 @@ export function RunAgentModal({
                 {run.settled && !run.result && !running && (
                   <p className="text-[12.5px] text-blocked">Payment settled, but the service didn't return a result.</p>
                 )}
-                {run.result && (
+                {run.result?.resource && (
+                  <p className="text-[12.5px] text-muted">
+                    {extending ? 'Time added to' : 'Started'}{' '}
+                    <span className="font-mono text-ink">{run.result.resource.name}</span> on local Docker.
+                  </p>
+                )}
+                {run.result && !run.result.resource && (
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] sm:grid-cols-4">
                     <Fact k="Tokens in" v={String(run.result.usage.input_tokens)} />
                     <Fact k="Tokens out" v={String(run.result.usage.output_tokens)} />
@@ -511,7 +561,8 @@ export function RunAgentModal({
               </Stage>
 
               <Stage n={6} title="Result" state={run.result ? 'done' : 'idle'}>
-                {run.result && (
+                {run.result?.resource && <ResourceCard resource={run.result.resource} onOpen={onClose} />}
+                {run.result && !run.result.resource && (
                   <p className="copy rounded-md border border-hairline bg-sunken px-3 py-2.5 text-[12.5px] text-ink-dim">
                     {run.result.completion}
                   </p>
@@ -567,6 +618,28 @@ export function RunAgentModal({
         </Button>
       </ModalFoot>
     </Modal>
+  )
+}
+
+/** What a compute payment bought: the running container and its deadline. */
+function ResourceCard({ resource, onOpen }: { resource: ComputeResource; onOpen: () => void }) {
+  const expires = new Date(resource.expires_at)
+  return (
+    <div className="rounded-md border border-authority/25 bg-sunken px-3 py-2.5 text-[12.5px]">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-4">
+        <Fact k="Container" v={resource.name} />
+        <Fact k="Image" v={resource.image} />
+        <Fact k="Removed at" v={expires.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} />
+        <Fact k="Payments" v={String(resource.paid_by.length)} />
+      </dl>
+      <Link
+        to="/services"
+        onClick={onOpen}
+        className="mt-2 inline-block text-authority underline-offset-2 hover:underline focus-visible:underline active:opacity-70"
+      >
+        Watch it in Services
+      </Link>
+    </div>
   )
 }
 

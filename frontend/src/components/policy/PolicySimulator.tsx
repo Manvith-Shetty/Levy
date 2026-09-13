@@ -8,7 +8,7 @@ import { Card, CardHead } from '../common/Card'
 import { Label, MoneyInput, Select } from '../common/Field'
 import { PolicyChecklist } from './PolicyChecklist'
 
-const SERVICES = ['inference', 'compute', 'data']
+const SERVICES = ['inference', 'compute', 'ops', 'data']
 
 /**
  * Asks the gateway's policy engine about a payment that never happens: the

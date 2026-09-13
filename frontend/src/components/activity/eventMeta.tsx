@@ -10,6 +10,7 @@ export const KIND_LABEL: Record<ActivityKind, string> = {
   'agent.revoked': 'Agent revoked',
   'agent.renewed': 'Authority renewed',
   'policy.changed': 'Policy changed',
+  'compute.stopped': 'Container removed',
 }
 
 export const KIND_TONE: Record<ActivityKind, { dot: string; text: string }> = {
@@ -20,6 +21,7 @@ export const KIND_TONE: Record<ActivityKind, { dot: string; text: string }> = {
   'agent.revoked': { dot: 'bg-blocked', text: 'text-blocked' },
   'agent.renewed': { dot: 'bg-authority', text: 'text-authority' },
   'policy.changed': { dot: 'bg-warn', text: 'text-warn' },
+  'compute.stopped': { dot: 'bg-idle', text: 'text-muted' },
 }
 
 /** The event's amount in its own asset. */
@@ -50,6 +52,8 @@ export function describe(event: ActivityEvent, index: AgentIndex): string {
       return event.reason ?? `${agent}'s authority was renewed`
     case 'policy.changed':
       return event.reason ?? `${agent} changed a policy`
+    case 'compute.stopped':
+      return `${agent}'s container ${event.resource ?? ''} was removed: ${event.reason ?? 'stopped'}`
   }
 }
 
@@ -71,5 +75,7 @@ export function describeShort(event: ActivityEvent, index: AgentIndex): string {
       return `${agent} renewed`
     case 'policy.changed':
       return 'Policy changed'
+    case 'compute.stopped':
+      return `${agent} container removed`
   }
 }

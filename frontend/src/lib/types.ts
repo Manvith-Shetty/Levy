@@ -90,6 +90,7 @@ export type ActivityKind =
   | 'agent.revoked'
   | 'agent.renewed'
   | 'policy.changed'
+  | 'compute.stopped'
 
 export type Network = 'hedera-testnet' | 'hedera-mainnet' | 'ethereum-sepolia'
 
@@ -136,6 +137,8 @@ export interface ActivityEvent {
   hcsSequence?: number
   /** Service category bought or refused (`inference`, `compute`). */
   category?: string
+  /** Compute: the container a payment started, or one that was torn down. */
+  resource?: string
 }
 
 export interface Policy {

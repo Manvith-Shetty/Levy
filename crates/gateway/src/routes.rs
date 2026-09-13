@@ -17,6 +17,8 @@ use time::{Duration, OffsetDateTime};
 use crate::env::Config;
 use crate::hcs::{HcsMessage, ReceiptLog};
 use crate::inference;
+use crate::compute::Broker;
+use crate::ops::{Ops, SCENARIOS};
 use crate::ledger::SpendLedger;
 use crate::mandate_guard::{self, AnyResolver};
 use crate::quotes::QuoteStore;
@@ -42,6 +44,10 @@ pub struct AppState {
     pub mandate_mock: Option<Arc<MockResolver>>,
     /// Spending so far per mandate node, replayed from HCS.
     pub ledger: Arc<SpendLedger>,
+    /// The Docker compute broker, when `COMPUTE_BACKEND=docker`.
+    pub broker: Option<Arc<Broker>>,
+    /// The Compose stack this provider repairs, when `OPS_COMPOSE_FILE` is set.
+    pub ops: Option<Arc<Ops>>,
 }
 
 pub(crate) fn error(status: StatusCode, message: &str) -> Response {
@@ -66,6 +72,8 @@ pub async fn manifest(State(state): State<AppState>) -> Json<ServiceManifest> {
         x402_version: 2,
         category: cfg.category.clone(),
         description: cfg.description.clone(),
+        compute: state.broker.as_ref().map(|b| b.offer().clone()),
+        ops: state.ops.as_ref().map(|o| o.offer().clone()),
     })
 }
 
@@ -75,6 +83,61 @@ pub async fn manifest(State(state): State<AppState>) -> Json<ServiceManifest> {
 /// published schedule. The resulting quote id is what makes the 402 on
 /// `/v1/infer` specific to this prompt rather than a flat per-call fee.
 pub async fn quote(State(state): State<AppState>, Json(body): Json<QuoteRequest>) -> Response {
+    // Ops providers price one repair on their stack.
+    if let Some(ops) = &state.ops {
+        let Some(action) = body.action else {
+            return error(StatusCode::BAD_REQUEST, "this provider sells repairs; send an action {action, service}");
+        };
+        let amount = match ops.price(&action) {
+            Ok(amount) => amount,
+            Err(reason) => return error(StatusCode::BAD_REQUEST, &reason),
+        };
+        let cfg = &state.config;
+        let quote_id = uuid::Uuid::new_v4().to_string();
+        state.quotes.insert_action(quote_id.clone(), action, amount);
+        return Json(QuoteResponse {
+            infer_url: format!("{}?quote={quote_id}", cfg.infer_url()),
+            quote_id,
+            provider: cfg.provider.clone(),
+            model: cfg.model.clone(),
+            input_tokens: 0,
+            max_output_tokens: 0,
+            amount,
+            asset: cfg.asset.clone(),
+            network: cfg.network.clone(),
+            expires_in_secs: cfg.quote_ttl_secs,
+        })
+        .into_response();
+    }
+
+    // Compute providers price a job (image, command, minutes), not a prompt.
+    if let Some(broker) = &state.broker {
+        let Some(job) = body.job else {
+            return error(StatusCode::BAD_REQUEST, "this provider sells compute; send a job {image, command, minutes}");
+        };
+        let amount = match broker.price(&job).await {
+            Ok(amount) => amount,
+            Err(reason) => return error(StatusCode::BAD_REQUEST, &reason),
+        };
+        let cfg = &state.config;
+        let quote_id = uuid::Uuid::new_v4().to_string();
+        let minutes = job.minutes;
+        state.quotes.insert_job(quote_id.clone(), job, amount);
+        return Json(QuoteResponse {
+            infer_url: format!("{}?quote={quote_id}", cfg.infer_url()),
+            quote_id,
+            provider: cfg.provider.clone(),
+            model: cfg.model.clone(),
+            input_tokens: 0,
+            max_output_tokens: minutes,
+            amount,
+            asset: cfg.asset.clone(),
+            network: cfg.network.clone(),
+            expires_in_secs: cfg.quote_ttl_secs,
+        })
+        .into_response();
+    }
+
     if body.prompt.trim().is_empty() {
         return error(StatusCode::BAD_REQUEST, "prompt must not be empty");
     }
@@ -133,6 +196,81 @@ pub async fn infer(State(state): State<AppState>, Query(query): Query<InferQuery
     };
 
     let cfg = &state.config;
+
+    // Ops: run the repair. If Docker fails, the 502 means the payment is
+    // never settled.
+    if let Some(action) = &quote.action {
+        let Some(ops) = &state.ops else {
+            return error(StatusCode::BAD_GATEWAY, "ops backend unavailable");
+        };
+        return match ops.execute(action).await {
+            Ok(result) => {
+                state.quotes.record_resource(&quote_id, format!("{} {}", action.action, action.service));
+                state.quotes.record_usage(&quote_id, Usage { input_tokens: 0, output_tokens: 0 });
+                let what = format!(
+                    "Ran `{}`. The stack is {}.",
+                    result.command,
+                    if result.health.healthy { "healthy again".to_owned() } else { format!("still failing: {}", result.health.problems.join("; ")) }
+                );
+                Json(InferResponse {
+                    quote_id,
+                    provider: cfg.provider.clone(),
+                    model: cfg.model.clone(),
+                    completion: what,
+                    usage: Usage { input_tokens: 0, output_tokens: 0 },
+                    charged: quote.amount,
+                    unused_output_credit: 0,
+                    resource: None,
+                    ops: Some(result),
+                })
+                .into_response()
+            }
+            Err(error_) => {
+                tracing::error!(%error_, "repair failed");
+                error(StatusCode::BAD_GATEWAY, &format!("repair failed: {error_:#}"))
+            }
+        };
+    }
+
+    // Compute: start (or extend) the container. If Docker fails, the 502
+    // means the payment is never settled.
+    if let Some(job) = &quote.job {
+        let Some(broker) = &state.broker else {
+            return error(StatusCode::BAD_GATEWAY, "compute backend unavailable");
+        };
+        let agent = query.agent.clone().unwrap_or_default();
+        return match broker.provision(&agent, &quote_id, job).await {
+            Ok(resource) => {
+                state.quotes.record_resource(&quote_id, resource.id.clone());
+                state.quotes.record_usage(&quote_id, Usage { input_tokens: 0, output_tokens: 0 });
+                let what = if job.extend.is_some() {
+                    format!("Extended {} by {} min; it now runs until {}.", resource.name, job.minutes, resource.expires_at)
+                } else {
+                    format!(
+                        "Started {} ({}) for {} min. It is torn down at {} unless more time is paid for.",
+                        resource.name, resource.image, job.minutes, resource.expires_at
+                    )
+                };
+                Json(InferResponse {
+                    quote_id,
+                    provider: cfg.provider.clone(),
+                    model: cfg.model.clone(),
+                    completion: what,
+                    usage: Usage { input_tokens: 0, output_tokens: 0 },
+                    charged: quote.amount,
+                    unused_output_credit: 0,
+                    resource: Some(resource),
+                    ops: None,
+                })
+                .into_response()
+            }
+            Err(error_) => {
+                tracing::error!(%error_, "provisioning failed");
+                error(StatusCode::BAD_GATEWAY, &format!("compute backend failed: {error_:#}"))
+            }
+        };
+    }
+
     let completion = match inference::run(
         cfg.upstream.as_ref(),
         &cfg.model,
@@ -167,6 +305,8 @@ pub async fn infer(State(state): State<AppState>, Query(query): Query<InferQuery
         },
         charged: quote.amount,
         unused_output_credit: unused,
+        resource: None,
+        ops: None,
     })
     .into_response()
 }
@@ -179,6 +319,71 @@ pub async fn receipts(State(state): State<AppState>) -> Json<Vec<Receipt>> {
 /// `GET /v1/refusals` — payments the mandate guard blocked, newest last.
 pub async fn refusals(State(state): State<AppState>) -> Json<Vec<Refusal>> {
     Json(state.receipts.refusals())
+}
+
+/// `GET /v1/resources` — the containers this compute provider is running.
+pub async fn resources(State(state): State<AppState>) -> Response {
+    match &state.broker {
+        Some(broker) => Json(broker.list().await).into_response(),
+        None => error(StatusCode::NOT_FOUND, "this provider doesn't sell compute"),
+    }
+}
+
+/// `POST /v1/resources/{id}/stop` — the owner's kill switch for one container.
+/// Unauthenticated: fine on localhost, put it behind auth anywhere else.
+pub async fn stop_resource(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let Some(broker) = &state.broker else {
+        return error(StatusCode::NOT_FOUND, "this provider doesn't sell compute");
+    };
+    match broker.stop(&id, "stopped").await {
+        Ok(()) => Json(serde_json::json!({ "stopped": id })).into_response(),
+        Err(e) => error(StatusCode::NOT_FOUND, &e.to_string()),
+    }
+}
+
+/// `GET /v1/ops/health` — the stack right now. Free: watching costs
+/// nothing, only repairs are paid for.
+pub async fn ops_health(State(state): State<AppState>) -> Response {
+    match &state.ops {
+        Some(ops) => Json(ops.health().await).into_response(),
+        None => error(StatusCode::NOT_FOUND, "this provider doesn't run a stack"),
+    }
+}
+
+/// Body of `POST /v1/ops/chaos`.
+#[derive(Debug, Deserialize)]
+pub struct ChaosRequest {
+    /// `kill-cache`, `stop-api`, `freeze-web` or `reset`.
+    pub scenario: String,
+}
+
+/// `POST /v1/ops/chaos` — breaks the stack on purpose, for a demo (or
+/// `reset` brings it back). Off unless `OPS_CHAOS` allows it; unpaid and
+/// unauthenticated, so keep it on localhost.
+pub async fn ops_chaos(State(state): State<AppState>, Json(body): Json<ChaosRequest>) -> Response {
+    let Some(ops) = &state.ops else {
+        return error(StatusCode::NOT_FOUND, "this provider doesn't run a stack");
+    };
+    if !ops.chaos_enabled() {
+        return error(StatusCode::FORBIDDEN, "chaos is off (OPS_CHAOS=0)");
+    }
+    match ops.chaos(&body.scenario).await {
+        Ok(command) => Json(serde_json::json!({ "scenario": body.scenario, "ran": command })).into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, &format!("{e:#}")),
+    }
+}
+
+/// `GET /v1/ops/scenarios` — the outages `POST /v1/ops/chaos` can cause.
+pub async fn ops_scenarios(State(state): State<AppState>) -> Response {
+    let enabled = state.ops.as_ref().is_some_and(|o| o.chaos_enabled());
+    Json(serde_json::json!({
+        "enabled": enabled,
+        "scenarios": SCENARIOS.iter().map(|(id, label)| serde_json::json!({ "id": id, "label": label })).collect::<Vec<_>>(),
+    }))
+    .into_response()
 }
 
 /// Body of `POST /v1/authorize`.

@@ -219,6 +219,8 @@ mod tests {
             mandate: Some(guard),
             mandate_mock: Some(mock),
             ledger: Arc::new(crate::ledger::SpendLedger::new("http://localhost:0", None, "0.0.0")),
+            broker: None,
+            ops: None,
         }
     }
 

@@ -5,7 +5,8 @@
 # crates/gateway/.env (payee, asset, mandate tree, HCS topic); only the
 # variables below are overridden. Each announces itself on the HCS topic.
 #
-#   scripts/demo-providers.sh          # (re)start B, C (inference) and D (compute)
+#   scripts/demo-providers.sh          # (re)start B, C (inference), leash-compute (Docker)
+#                                      # and leash-ops (repairs on demo/shop)
 #   scripts/demo-providers.sh stop     # stop the ones this script started
 #
 # Logs: /tmp/leash-provider-<x>.log. Only PIDs this script recorded in
@@ -31,6 +32,8 @@ start() {
   local name=$1 port=$2 category=$3 model=$4 input=$5 output=$6 minimum=$7 hf_model=${8:-}
   local hf=()
   if [ "$hf_model" = "stub" ]; then hf=(HF_TOKEN=); elif [ -n "$hf_model" ]; then hf=(HF_MODEL="$hf_model"); fi
+  if [ "$category" = "compute" ]; then hf+=(COMPUTE_BACKEND=docker); fi
+  if [ "$category" = "ops" ]; then hf+=(OPS_COMPOSE_FILE=../../demo/shop/docker-compose.yaml); fi
   stop "$name"
   env PROVIDER_NAME=$name PORT=$port BASE_URL=http://localhost:$port MODEL=$model \
     SERVICE_CATEGORY=$category INPUT_PRICE_PER_1K=$input OUTPUT_PRICE_PER_1K=$output MIN_PAYMENT=$minimum \
@@ -40,7 +43,7 @@ start() {
 }
 
 if [ "${1:-}" = "stop" ]; then
-  for p in leash-provider-b leash-provider-c leash-provider-d; do stop $p; done
+  for p in leash-provider-b leash-provider-c leash-provider-d leash-compute leash-ops; do stop $p; done
   exit 0
 fi
 
@@ -51,5 +54,11 @@ fi
 # With HF_TOKEN set, B and C serve real models; without it, all use the stub.
 start leash-provider-b 4022 inference echo-mini 600 2500 100 Qwen/Qwen3-4B-Instruct-2507
 start leash-provider-c 4023 inference echo-pro 2000 8000 100 Qwen/Qwen3-235B-A22B-Instruct-2507
-# Compute: a flat $0.008 minimum per job. No agent in the tree allows compute.
-start leash-provider-d 4024 compute gpu-burst 4000 16000 8000 stub
+# Compute: real containers on local Docker, $0.0002 a minute, prepaid and torn
+# down when the time runs out (COMPUTE_* in .env tunes images and limits).
+stop leash-provider-d   # the old stub compute provider, if it's still up
+start leash-compute 4024 compute docker 0 0 0 stub
+# Ops: brings up demo/shop (web, api, Redis) and sells repairs on it —
+# start, restart, unpause, recreate — at $0.0005 each. The runner's
+# autopilot watches it and pays to fix it.
+start leash-ops 4025 ops compose 0 0 0 stub

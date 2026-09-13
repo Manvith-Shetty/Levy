@@ -9,6 +9,7 @@ import { Card } from '../components/common/Card'
 import { Button } from '../components/common/Button'
 import { EmptyState } from '../components/common/EmptyState'
 import { useToast } from '../app/toast'
+import { RunningResources } from '../components/services/RunningResources'
 
 export function Services() {
   const { services, live } = useLeash()
@@ -27,6 +28,8 @@ export function Services() {
         title="Services"
         subtitle="Paid services your agents can discover and buy per call, with no API key or subscription. Each one is checked against the agent's policy before it's paid."
       />
+
+      {services.some((svc) => svc.listing?.kind === 'compute') && <RunningResources />}
 
       {services.length === 0 && (
         <Card>
@@ -62,7 +65,7 @@ export function Services() {
 
 /** What agents buy most comes first. */
 function rank(category: string): number {
-  const order = ['Inference', 'Data', 'Compute']
+  const order = ['Inference', 'Data', 'Compute', 'Ops']
   const i = order.indexOf(category)
   return i === -1 ? order.length : i
 }

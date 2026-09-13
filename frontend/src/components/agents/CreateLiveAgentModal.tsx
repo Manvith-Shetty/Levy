@@ -14,7 +14,7 @@ const STEPS = ['Identity', 'Authority', 'Permissions', 'Expiration'] as const
 type Step = 0 | 1 | 2 | 3
 
 /** Services the gateway can sell today; the record is free text on-chain. */
-const SERVICES = ['inference', 'compute', 'storage']
+const SERVICES = ['inference', 'compute', 'ops', 'storage']
 
 /**
  * Mints a real child mandate on ENSv2 Sepolia. The MandateRegistrar enforces
@@ -269,7 +269,7 @@ export function CreateLiveAgentModal({
           <div className="space-y-5">
             <div>
               <h3 className="mb-2.5 text-[15px] font-semibold text-ink">Allowed services</h3>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-4">
                 {SERVICES.map((service) => (
                   <Checkbox
                     key={service}
@@ -282,8 +282,8 @@ export function CreateLiveAgentModal({
                 ))}
               </div>
               <p className="mt-2 text-[12px] text-faint">
-                Written to <span className="font-mono">allowedServices</span>. The gateway doesn't enforce
-                this record yet.
+                Written to <span className="font-mono">allowedServices</span>. The policy engine checks it on
+                every payment, for this agent and each of its parents.
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">

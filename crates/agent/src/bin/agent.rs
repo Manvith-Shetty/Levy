@@ -33,6 +33,8 @@ async fn main() -> Result<()> {
     let request = QuoteRequest {
         prompt: env.prompt.clone(),
         max_output_tokens: env.max_output_tokens,
+        job: None,
+        action: None,
     };
     let mut offers: Vec<Offer> = Vec::new();
     for base in &env.providers {

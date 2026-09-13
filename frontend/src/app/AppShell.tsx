@@ -101,10 +101,11 @@ export function AppShell() {
 
       {live.active && ui.runOpen && (
         <RunAgentModal
-          key={`run-${ui.runAgentId ?? 'default'}`}
+          key={`run-${ui.runAgentId ?? 'default'}-${ui.runPreset?.job?.extend ?? ui.runPreset?.service ?? ''}`}
           open
           onClose={ui.closeRun}
           agentId={ui.runAgentId}
+          preset={ui.runPreset}
         />
       )}
 

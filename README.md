@@ -143,7 +143,8 @@ sequenceDiagram
 #    MANDATE_MODE=ens, HCS keys; see .env.example)
 cd crates/gateway && cargo run -p gateway
 
-# 2. Providers B, C (inference) and D (compute): same binary, other names,
+# 2. Providers B, C (inference), leash-compute (containers) and leash-ops
+#    (repairs on demo/shop, which it brings up): same binary, other names,
 #    categories and prices. Each announces itself on HCS.
 scripts/demo-providers.sh
 
@@ -191,6 +192,93 @@ category, quotes them, and asks each one's policy engine, cheapest first, until
 one approves. `scripts/demo-providers.sh` starts three extra providers: B and C
 sell inference at other prices, D sells compute, which no agent's policy allows.
 
+## Compute: agents renting real infrastructure
+
+The same payment and policy path sells containers, not only tokens. A gateway
+started with `COMPUTE_BACKEND=docker` becomes a **compute broker**: it rents
+containers on the local Docker daemon, prepaid by the minute, and never hands
+out credentials. `scripts/demo-providers.sh` starts one as `leash-compute`
+(port 4024, $0.0002/min).
+
+1. **Task → job.** The owner gives an agent a task in plain words ("Run a Redis
+   cache for 10 minutes"). The runner plans it into a job the broker offers
+   (`image`, `command`, `minutes`): with `HF_TOKEN` set in `crates/agent/.env`,
+   a model (`PLANNER_MODEL`, default Qwen3 4B) proposes it, constrained to the
+   broker's image allowlist and time limit; otherwise keyword rules do. The
+   planner only proposes.
+2. **Quote → authorize → pay.** Priced per minute, checked by the policy engine
+   (`compute` must be in `allowedServices` at every node), paid over x402.
+3. **Provision.** The container starts with CPU, memory and process limits and
+   a deadline. Docker failing means a 502, and the payment is never settled.
+4. **Teardown.** A reaper removes it when the prepaid time ends, and within
+   ~20s if the paying agent's authority is revoked or expires, so revoking an
+   agent stops its infrastructure. Every teardown is published to HCS.
+5. **Extend.** More time is a new payment through the same policy check
+   ("Add 5 min" on Services → Running now); only the paying agent can extend.
+
+Endpoints on a compute broker: `POST /v1/quote` with `{ job }`, the same gated
+`/v1/infer`, `GET /v1/resources`, `POST /v1/resources/{id}/stop` (the owner's
+kill switch; unauthenticated, so localhost only). Known gap: a container starts
+before settlement completes, so a settlement that fails after a successful
+start leaves it running until its deadline.
+
+To let an agent buy compute, add `compute` to its `allowedServices` and every
+parent's (only the deployer can write records):
+
+```sh
+cd frontend
+node scripts/set-record.mjs root allowedServices inference,compute --dry-run   # check, no key
+DEPLOYER_KEY=0x... node scripts/set-record.mjs root allowedServices inference,compute
+DEPLOYER_KEY=0x... node scripts/set-record.mjs agent.root allowedServices inference,compute
+```
+
+`agent.root` can then rent containers; `sub.agent.root` stays inference-only
+and is denied, which is the other half of the demo.
+
+## Autopilot: three agents keep a stack alive
+
+`demo/shop` is a small Docker Compose app: `web` (front end on :8088) proxies
+`/api` to `api`, which keeps its counter in `cache` (Redis). Nothing restarts
+on its own. A gateway started with `OPS_COMPOSE_FILE` becomes an **ops
+provider** (`leash-ops`, port 4025): it brings the stack up, reports its health
+for free (`GET /v1/ops/health`: container states, healthchecks, recent logs,
+an end-to-end probe) and sells a small menu of repairs over x402 at $0.0005
+each: `start`, `restart`, `unpause` or `recreate`, on a service of that stack
+and nothing else. No shell, no arguments.
+
+The agent runner's autopilot (Dashboard → **Autopilot**) splits the work
+across three agents, each under its own mandate:
+
+| Agent | Default | Does | Pays for |
+|---|---|---|---|
+| Detect | `watcher` | reads health every 2s; opens an incident after two failed checks | nothing, so it needs no authority |
+| Diagnose | `sub.agent.root` | gets the evidence and the repair menu, returns a root cause and the fewest repairs | LLM inference (`inference`) |
+| Repair | `agent.root` | buys each repair, stops once the stack is healthy | repairs (`ops`) |
+
+Then the detector confirms recovery from outside and the incident records the
+time to fix. The model only proposes; its plan is filtered to the menu, and if
+it can't be bought or parsed the built-in runbook decides (and says so).
+`sub.agent.root` can't buy `ops`, so the agent that reasons can't act. If a
+repair is denied, or it doesn't bring the stack back, autopilot pauses itself
+instead of paying again. Every payment is policy-checked and on HCS; repair
+receipts carry what was run (`resource: "start cache"`).
+
+Break it from the page (Kill the Redis cache, Stop the API, Freeze the web
+server) or from a terminal (`docker compose -p leash-shop kill cache`). To let
+`agent.root` repair, add `ops` along its chain:
+
+```sh
+cd frontend
+DEPLOYER_KEY=0x... node scripts/set-record.mjs root allowedServices inference,compute,ops
+DEPLOYER_KEY=0x... node scripts/set-record.mjs agent.root allowedServices inference,compute,ops
+```
+
+Runner endpoints: `GET /v1/autopilot` (state, incidents), `POST /v1/autopilot`
+`{ enabled }`, `POST /v1/autopilot/respond` (once, now), `POST
+/v1/autopilot/chaos` `{ scenario }`. Set `AUTOPILOT=1` to start it on;
+`AUTOPILOT_{DETECT,DIAGNOSE,FIX}_AGENT` and `OPS_PROVIDER` override the defaults.
+One incident costs about $0.0013: a diagnosis (~$0.0008) and one repair.
+
 ## Demo (≤5 min), all from the dashboard
 
 1. **Overview**: the tree, the shared wallet's USDC balance, the HCS trail.
@@ -198,11 +286,20 @@ sell inference at other prices, D sells compute, which no agent's policy allows.
    on the HCS registry, three quote per token, Leash approves the cheapest
    (every check ✓), the agent pays it over x402, Blocky402 settles USDC on
    Hedera, the result comes back, and the receipt is confirmed on HCS.
-3. **Give it a compute task**: provider D quotes $0.008, Leash denies it
-   (compute isn't in `allowedServices`, and it's over `maxPerCall`), nothing is
+3. **Give it a compute task**: the job is planned and quoted, and Leash denies
+   it: compute isn't in `sub.agent.root`'s `allowedServices`. Nothing is
    signed. **Policies → simulator** shows the same decision without a task.
-4. **Revoke `root`** (one `unregister` tx, no loop over children): the next run
-   as `sub.agent.root` is blocked, naming `root`. Restore it.
-5. **Activity**: the whole trail, replayed from HCS.
+4. **Give `agent.root` "Run a Redis cache for 10 minutes"**: approved, paid, and
+   a real container starts; watch it count down in Services → Running now, add
+   5 minutes (another checked payment), or let it expire.
+5. **Revoke `root`** (one `unregister` tx, no loop over children): the next run
+   is blocked naming `root`, and the running container is torn down within
+   seconds ("its agent's authority was revoked", on HCS). Restore it.
+6. **Autopilot**: switch it on and click "Kill the Redis cache". The watcher
+   sees the cache exit and the API turn unhealthy; `sub.agent.root` pays a
+   model, which names the cache (not the API) as the cause; `agent.root` pays
+   for `start cache`; the watcher confirms and the page shows the time to fix.
+   Before `ops` is granted, the repair is denied and autopilot pauses.
+7. **Activity**: the whole trail, replayed from HCS.
 
 Budgets are the `budget/allowedServices/ratePerMinute/maxPerCall` text records.

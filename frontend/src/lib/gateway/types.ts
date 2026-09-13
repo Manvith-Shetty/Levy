@@ -29,6 +29,8 @@ export interface ServiceManifest {
   /** `inference`, `compute`, `data` — what `allowedServices` is checked against. */
   category?: string
   description?: string
+  compute?: { per_minute: number; max_minutes: number; images: string[]; limits: string }
+  ops?: { project: string; per_action: number; actions: string[]; services: string[] }
 }
 
 /** A provider registering itself on the HCS topic — mirrors `meter::ServiceAnnouncement`. */
@@ -42,6 +44,7 @@ export interface ServiceAnnouncement {
   asset: string
   pricing: PriceModel
   announced_at: string
+  per_minute?: number
 }
 
 export interface PolicyCheck {
@@ -95,6 +98,17 @@ export interface Receipt {
   settled_at: string
   mandate_path: MandateHop[]
   service?: string
+  resource?: string
+}
+
+/** A compute container ending — mirrors `meter::ComputeEvent`. */
+export interface ComputeEvent {
+  kind: string
+  provider: string
+  resource: string
+  agent: string
+  reason: 'expired' | 'revoked' | 'stopped' | string
+  at: string
 }
 
 /** A payment the mandate guard blocked before any price tag was issued —

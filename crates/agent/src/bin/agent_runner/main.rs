@@ -21,6 +21,9 @@
 //! - `GET  /v1/providers` — every discovered provider and its manifest.
 //! - `POST /v1/run`       — `{ agent, service?, prompt?, max_output_tokens?, budget_atomic? }`,
 //!   answered with `text/event-stream`.
+//! - `GET|POST /v1/autopilot`, `POST /v1/autopilot/respond`,
+//!   `POST /v1/autopilot/chaos` — three agents keeping a Compose stack
+//!   alive; see `autopilot.rs`.
 //!
 //! It spends real money from the shared wallet, so it runs one request at a
 //! time, caps every run at `RUNNER_MAX_ATOMIC`, and — when `RUNNER_TOKEN` is
@@ -31,7 +34,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent::client::{Challenge, Client, Offer, PurchaseOutcome, Wallet, hashscan_tx};
+mod autopilot;
+
+use agent::client::{Challenge, Client, Offer, PurchaseOutcome, Settlement, Wallet, hashscan_tx};
 use anyhow::{Context, Result};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -41,7 +46,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use common::utils::get_from_env_unsafe;
-use meter::{QuoteRequest, ServiceManifest};
+use meter::{AssetInfo, ComputeOffer, InferResponse, JobSpec, OpsAction, QuoteRequest, ServiceManifest};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
@@ -65,14 +70,26 @@ struct Runner {
     max_atomic: u64,
     max_output_tokens: u64,
     token: Option<String>,
+    /// Hugging Face token for the planner (turns a task into a job).
+    hf_token: Option<String>,
+    planner_model: String,
     /// Held for the whole run; also remembers when the last one finished.
     busy: Arc<Mutex<Option<Instant>>>,
+    /// The three agents keeping the ops stack alive, and what they've done.
+    autopilot: autopilot::Config,
+    pilot: Arc<std::sync::Mutex<autopilot::State>>,
 }
 
 #[derive(Deserialize)]
 struct RunRequest {
     agent: String,
     service: Option<String>,
+    /// Compute: an explicit job (or an `extend`). Planned from the prompt
+    /// when missing.
+    job: Option<JobSpec>,
+    /// Only shop at this provider (base URL) — extensions must go back to
+    /// the provider running the resource.
+    provider: Option<String>,
     prompt: Option<String>,
     max_output_tokens: Option<u64>,
     budget_atomic: Option<u64>,
@@ -109,16 +126,27 @@ async fn main() -> Result<()> {
         topic_id: get_from_env_unsafe::<String>("HCS_TOPIC_ID").ok().filter(|t| !t.is_empty()),
         max_atomic: get_from_env_unsafe("RUNNER_MAX_ATOMIC").unwrap_or(10_000),
         max_output_tokens: get_from_env_unsafe("MAX_OUTPUT_TOKENS").unwrap_or(128),
+        hf_token: get_from_env_unsafe::<String>("HF_TOKEN").ok().filter(|t| !t.trim().is_empty()),
+        planner_model: get_from_env_unsafe("PLANNER_MODEL")
+            .unwrap_or_else(|_| "Qwen/Qwen3-4B-Instruct-2507".into()),
         token: get_from_env_unsafe::<String>("RUNNER_TOKEN")
             .ok()
             .filter(|t| !t.is_empty()),
         busy: Arc::new(Mutex::new(None)),
+        autopilot: autopilot::Config::from_env(),
+        pilot: Arc::new(std::sync::Mutex::new(autopilot::State::default())),
     });
+    autopilot::spawn_watcher(Arc::clone(&runner));
 
     let app = Router::new()
         .route("/v1/runner", get(info))
         .route("/v1/providers", get(providers_route))
         .route("/v1/run", post(run))
+        .route("/v1/resources", get(resources_route))
+        .route("/v1/resources/stop", post(stop_route))
+        .route("/v1/autopilot", get(autopilot::state_route).post(autopilot::toggle_route))
+        .route("/v1/autopilot/respond", post(autopilot::respond_route))
+        .route("/v1/autopilot/chaos", post(autopilot::chaos_route))
         .with_state(Arc::clone(&runner));
 
     let addr = format!("0.0.0.0:{port}");
@@ -176,6 +204,7 @@ async fn info(State(runner): State<Arc<Runner>>) -> Json<Value> {
         "max_atomic": runner.max_atomic,
         "max_output_tokens": runner.max_output_tokens,
         "requires_token": runner.token.is_some(),
+        "planner": runner.hf_token.as_ref().map(|_| runner.planner_model.clone()),
     }))
 }
 
@@ -377,6 +406,8 @@ async fn run(
         return refuse(StatusCode::TOO_MANY_REQUESTS, "wait a moment between runs");
     }
 
+    let job = request.job;
+    let only_provider = request.provider.map(|p| p.trim_end_matches('/').to_owned());
     let (tx, rx) = mpsc::unbounded_channel::<Value>();
     let task_runner = Arc::clone(&runner);
     tokio::spawn(async move {
@@ -384,7 +415,18 @@ async fn run(
         let emit = |value: Value| {
             let _ = tx.send(value);
         };
-        if let Err(error) = purchase(&task_runner, &agent, &service, &prompt, max_output_tokens, budget, &emit).await {
+        let order = Order {
+            agent: &agent,
+            service: &service,
+            prompt: &prompt,
+            max_output_tokens,
+            budget,
+            job,
+            action: None,
+            only_provider,
+            await_audit: true,
+        };
+        if let Err(error) = purchase(&task_runner, order, &emit).await {
             emit(json!({ "step": "error", "message": format!("{error:#}") }));
         }
         emit(json!({ "step": "done", "elapsed_ms": started.elapsed().as_millis() as u64 }));
@@ -396,17 +438,165 @@ async fn run(
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
-/// One purchase, narrated through `emit`: discover, quote, authorize, pay,
-/// execute, audit. Mirrors `bin/agent.rs`, plus the policy check up front.
-async fn purchase(
-    runner: &Runner,
-    agent: &str,
-    service: &str,
-    prompt: &str,
+/// Turns a task into a job the offer allows. Asks the planner model when a
+/// Hugging Face token is set; falls back to simple rules otherwise or if the
+/// model's answer doesn't fit the offer.
+async fn plan_job(runner: &Runner, task: &str, offers: &[ComputeOffer]) -> (JobSpec, String, Option<String>) {
+    let images: Vec<String> = offers.iter().flat_map(|o| o.images.clone()).collect();
+    let max_minutes = offers.iter().map(|o| o.max_minutes).max().unwrap_or(10).max(1);
+
+    if let Some(token) = &runner.hf_token {
+        match ask_planner(runner, token, task, &images, max_minutes).await {
+            Ok(job) if images.contains(&job.image) && (1..=max_minutes).contains(&job.minutes) => {
+                return (job, runner.planner_model.clone(), None);
+            }
+            Ok(job) => {
+                let note = format!("the model proposed {} for {} min, outside the offer; used rules", job.image, job.minutes);
+                return (rules_plan(task, &images, max_minutes), "rules".into(), Some(note));
+            }
+            Err(error) => {
+                let note = format!("planner model unavailable ({error:#}); used rules");
+                return (rules_plan(task, &images, max_minutes), "rules".into(), Some(note));
+            }
+        }
+    }
+    (rules_plan(task, &images, max_minutes), "rules".into(), None)
+}
+
+async fn ask_planner(runner: &Runner, token: &str, task: &str, images: &[String], max_minutes: u64) -> Result<JobSpec> {
+    let system = format!(
+        "You plan container jobs for an infrastructure agent. Reply with one JSON object and nothing else: \
+         {{\"image\": string, \"command\": string, \"minutes\": integer}}. \
+         image must be one of: {}. minutes between 1 and {max_minutes}. \
+         command is a POSIX sh command for that image; use \"\" to run the image's default service (e.g. a Redis server). \
+         Keep the process alive for the whole time if the task is a service; print useful output.",
+        images.join(", ")
+    );
+    let response: Value = reqwest::Client::new()
+        .post("https://router.huggingface.co/v1/chat/completions")
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(25))
+        .json(&json!({
+            "model": runner.planner_model,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": task },
+            ],
+            "max_tokens": 200,
+            "temperature": 0.2,
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let content = response["choices"][0]["message"]["content"].as_str().unwrap_or_default();
+    let start = content.find('{').context("no JSON in the planner's answer")?;
+    let end = content.rfind('}').context("no JSON in the planner's answer")?;
+    let job: JobSpec = serde_json::from_str(&content[start..=end]).context("planner JSON didn't parse")?;
+    Ok(JobSpec { extend: None, ..job })
+}
+
+/// Keyword rules, for when there's no planner model.
+fn rules_plan(task: &str, images: &[String], max_minutes: u64) -> JobSpec {
+    let lower = task.to_lowercase();
+    let pick = |needle: &str| images.iter().find(|i| i.contains(needle)).cloned();
+    let (image, command) = if let Some(image) = lower.contains("redis").then(|| pick("redis")).flatten() {
+        (image, String::new())
+    } else if let Some(image) = lower.contains("python").then(|| pick("python")).flatten() {
+        (image, "python -c \"import platform,time; print('python', platform.python_version(), 'ready'); time.sleep(10**6)\"".into())
+    } else {
+        let image = pick("alpine").or_else(|| images.first().cloned()).unwrap_or_default();
+        (image, "echo \"job started on $(uname -m)\"; while true; do date; sleep 30; done".into())
+    };
+    let minutes = lower
+        .split(|c: char| !c.is_ascii_digit())
+        .find_map(|n| n.parse::<u64>().ok())
+        .unwrap_or(5)
+        .clamp(1, max_minutes);
+    JobSpec { image, command, minutes, extend: None }
+}
+
+/// `GET /v1/resources` — every discovered compute provider's containers.
+async fn resources_route(State(runner): State<Arc<Runner>>) -> Json<Value> {
+    let http = reqwest::Client::new();
+    let mut out = Vec::new();
+    for d in discover(&runner).await {
+        let Ok(manifest) = &d.manifest else { continue };
+        if manifest.compute.is_none() {
+            continue;
+        }
+        let listed: Value = match http.get(format!("{}/v1/resources", d.base_url)).timeout(Duration::from_secs(8)).send().await {
+            Ok(r) => r.json().await.unwrap_or(Value::Null),
+            Err(_) => Value::Null,
+        };
+        out.push(json!({ "base_url": d.base_url, "provider": manifest.provider, "resources": listed }));
+    }
+    Json(json!({ "providers": out }))
+}
+
+#[derive(Deserialize)]
+struct StopRequest {
+    base_url: String,
+    id: String,
+}
+
+/// `POST /v1/resources/stop` — the owner's kill switch, forwarded to the
+/// provider running it (only providers discovery knows about).
+async fn stop_route(State(runner): State<Arc<Runner>>, headers: HeaderMap, Json(body): Json<StopRequest>) -> Response {
+    if !authorized(&runner, &headers) {
+        return refuse(StatusCode::UNAUTHORIZED, "missing or wrong runner token");
+    }
+    let base = body.base_url.trim_end_matches('/').to_owned();
+    if !discover(&runner).await.iter().any(|d| d.base_url == base) {
+        return refuse(StatusCode::BAD_REQUEST, "unknown provider");
+    }
+    if body.id.is_empty() || !body.id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return refuse(StatusCode::BAD_REQUEST, "bad resource id");
+    }
+    match reqwest::Client::new().post(format!("{base}/v1/resources/{}/stop", body.id)).send().await {
+        Ok(r) => {
+            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            (status, Json(r.json::<Value>().await.unwrap_or(Value::Null))).into_response()
+        }
+        Err(e) => refuse(StatusCode::BAD_GATEWAY, &e.to_string()),
+    }
+}
+
+/// What one agent wants to buy.
+struct Order<'a> {
+    agent: &'a str,
+    service: &'a str,
+    prompt: &'a str,
     max_output_tokens: u64,
     budget: u64,
-    emit: &impl Fn(Value),
-) -> Result<()> {
+    /// Compute: the job (planned from the prompt when missing).
+    job: Option<JobSpec>,
+    /// Ops: the repair.
+    action: Option<OpsAction>,
+    /// Only shop at this provider (base URL).
+    only_provider: Option<String>,
+    /// Wait for the receipt on HCS before returning. Off when the caller
+    /// has more to do and confirms the receipt in the background.
+    await_audit: bool,
+}
+
+/// What a purchase paid for.
+struct Bought {
+    result: Box<InferResponse>,
+    settlement: Option<Settlement>,
+    /// Topic the receipt goes to.
+    topic: Option<String>,
+    amount: u64,
+    asset: AssetInfo,
+}
+
+/// One purchase, narrated through `emit`: discover, quote, authorize, pay,
+/// execute, audit. Mirrors `bin/agent.rs`, plus the policy check up front.
+/// `None` when it stopped short of paying (no provider, over budget,
+/// denied, refused, failed) — `emit` has said why.
+async fn purchase(runner: &Runner, order: Order<'_>, emit: &impl Fn(Value)) -> Result<Option<Bought>> {
+    let Order { agent, service, prompt, max_output_tokens, budget, job, action, only_provider, await_audit } = order;
     let client = Client::new(runner.wallet.clone());
     emit(json!({
         "step": "start",
@@ -428,16 +618,37 @@ async fn purchase(
     let matching: Vec<&Discovered> = found
         .iter()
         .filter(|d| d.manifest.as_ref().is_ok_and(|m| m.category.eq_ignore_ascii_case(service)))
+        .filter(|d| only_provider.as_ref().is_none_or(|only| &d.base_url == only))
         .collect();
     if matching.is_empty() {
         emit(json!({ "step": "no_provider", "service": service }));
-        return Ok(());
+        return Ok(None);
     }
 
-    // 2. Quote: price this prompt with each.
+    // Compute sells jobs, not prompts: turn the task into one (image,
+    // command, minutes), within what the providers offer. The planner only
+    // proposes; Leash still decides whether it may be paid for.
+    let offers_compute: Vec<ComputeOffer> = matching
+        .iter()
+        .filter_map(|d| d.manifest.as_ref().ok().and_then(|m| m.compute.clone()))
+        .collect();
+    let job = if offers_compute.is_empty() {
+        None
+    } else if let Some(job) = job.filter(|j| j.extend.is_some() || !j.image.is_empty()) {
+        emit(json!({ "step": "planned", "job": job, "planner": "given" }));
+        Some(job)
+    } else {
+        let (job, planner, note) = plan_job(runner, prompt, &offers_compute).await;
+        emit(json!({ "step": "planned", "job": job, "planner": planner, "note": note }));
+        Some(job)
+    };
+
+    // 2. Quote: price this prompt (or job) with each.
     let request = QuoteRequest {
         prompt: prompt.to_owned(),
         max_output_tokens,
+        job,
+        action,
     };
     let mut offers: Vec<Offer> = Vec::new();
     for provider in matching {
@@ -470,7 +681,7 @@ async fn purchase(
     }
     if offers.is_empty() {
         emit(json!({ "step": "no_provider", "service": service, "unavailable": true }));
-        return Ok(());
+        return Ok(None);
     }
     offers.sort_by_key(|o| o.quote.amount);
     let cheapest = offers[0].quote.amount;
@@ -482,7 +693,7 @@ async fn purchase(
             "cheapest": cheapest,
             "asset": offers[0].quote.asset,
         }));
-        return Ok(());
+        return Ok(None);
     }
 
     // 3. Authorize: Leash's policy engine decides, per provider, cheapest
@@ -514,7 +725,7 @@ async fn purchase(
     }
     let Some(chosen) = chosen else {
         emit(json!({ "step": "denied", "decision": first_denial }));
-        return Ok(());
+        return Ok(None);
     };
     emit(json!({
         "step": "selected",
@@ -530,7 +741,7 @@ async fn purchase(
     match client.challenge(chosen, agent).await? {
         Challenge::MandateRejected { reason } => {
             emit(json!({ "step": "refused", "reason": reason }));
-            return Ok(());
+            return Ok(None);
         }
         Challenge::PaymentRequired { requirements } => {
             emit(json!({ "step": "payment_required", "requirements": requirements }));
@@ -541,7 +752,7 @@ async fn purchase(
         Ok(outcome) => outcome,
         Err(error) => {
             emit(json!({ "step": "payment_failed", "message": format!("{error:#}") }));
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -549,11 +760,11 @@ async fn purchase(
     let (result, settlement) = match outcome {
         PurchaseOutcome::MandateRejected { reason } => {
             emit(json!({ "step": "refused", "reason": reason }));
-            return Ok(());
+            return Ok(None);
         }
         PurchaseOutcome::ServiceFailed { reason } => {
             emit(json!({ "step": "service_failed", "reason": reason }));
-            return Ok(());
+            return Ok(None);
         }
         PurchaseOutcome::Approved { result, settlement } => (result, settlement),
     };
@@ -576,12 +787,28 @@ async fn purchase(
         "unused_output_credit": result.unused_output_credit,
         "asset": chosen.quote.asset,
         "quote_id": result.quote_id,
+        "resource": result.resource,
+        "base_url": chosen.manifest.base_url.trim_end_matches('/'),
     }));
 
     // 6. Audit: the receipt reaching consensus on the topic.
     let topic = chosen.manifest.receipts_topic.clone().or_else(|| runner.topic_id.clone());
+    if await_audit {
+        audit(runner, topic.as_deref(), settlement.as_ref(), emit).await;
+    }
+    Ok(Some(Bought {
+        result,
+        settlement,
+        topic,
+        amount: chosen.quote.amount,
+        asset: chosen.quote.asset.clone(),
+    }))
+}
+
+/// Waits for a settlement's receipt on the topic and says how it went.
+async fn audit(runner: &Runner, topic: Option<&str>, settlement: Option<&Settlement>, emit: &impl Fn(Value)) {
     match (topic, settlement) {
-        (Some(topic), Some(s)) => match await_receipt(runner, &topic, &s.transaction).await {
+        (Some(topic), Some(s)) => match await_receipt(runner, topic, &s.transaction).await {
             Some((sequence, consensus)) => emit(json!({
                 "step": "audited",
                 "topic": topic,
@@ -592,12 +819,21 @@ async fn purchase(
         },
         _ => emit(json!({ "step": "audit_pending", "topic": Value::Null })),
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::valid_agent_name;
+
+    #[test]
+    fn rules_pick_an_offered_image_and_a_bounded_runtime() {
+        let images = vec!["alpine:3.20".to_owned(), "python:3.12-alpine".to_owned(), "redis:7-alpine".to_owned()];
+        let job = super::rules_plan("Run a Redis cache for 12 minutes", &images, 30);
+        assert_eq!((job.image.as_str(), job.command.as_str(), job.minutes), ("redis:7-alpine", "", 12));
+        let job = super::rules_plan("start a python worker for 90 min", &images, 30);
+        assert_eq!((job.image.as_str(), job.minutes), ("python:3.12-alpine", 30));
+        assert_eq!(super::rules_plan("do something", &images, 30).image, "alpine:3.20");
+    }
 
     #[test]
     fn agent_names_are_dotted_lowercase_labels() {
