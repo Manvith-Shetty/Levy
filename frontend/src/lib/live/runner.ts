@@ -92,7 +92,7 @@ export type RunStep =
   | { step: 'refused'; reason: string }
   | { step: 'paying'; payer: string }
   | { step: 'payment_failed'; message: string }
-  | { step: 'service_failed'; reason: string }
+  | { step: 'service_failed'; reason: string; provider?: string; trying_next?: boolean }
   | { step: 'settled'; transaction: string; network: string; payer: string; explorer: string }
   | {
       step: 'result'

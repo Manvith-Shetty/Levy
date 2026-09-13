@@ -45,6 +45,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
+use common::models::{ModelPicker, model_unavailable};
 use common::utils::get_from_env_unsafe;
 use meter::{AssetInfo, ComputeOffer, InferResponse, JobSpec, OpsAction, QuoteRequest, ServiceManifest};
 use serde::Deserialize;
@@ -71,8 +72,9 @@ struct Runner {
     max_output_tokens: u64,
     token: Option<String>,
     /// Hugging Face token for the planner (turns a task into a job).
-    hf_token: Option<String>,
-    planner_model: String,
+    /// Picks the planner model from Hugging Face's live catalog, when
+    /// `HF_TOKEN` is set.
+    planner: Option<Arc<ModelPicker>>,
     /// Held for the whole run; also remembers when the last one finished.
     busy: Arc<Mutex<Option<Instant>>>,
     /// The three agents keeping the ops stack alive, and what they've done.
@@ -126,9 +128,15 @@ async fn main() -> Result<()> {
         topic_id: get_from_env_unsafe::<String>("HCS_TOPIC_ID").ok().filter(|t| !t.is_empty()),
         max_atomic: get_from_env_unsafe("RUNNER_MAX_ATOMIC").unwrap_or(10_000),
         max_output_tokens: get_from_env_unsafe("MAX_OUTPUT_TOKENS").unwrap_or(128),
-        hf_token: get_from_env_unsafe::<String>("HF_TOKEN").ok().filter(|t| !t.trim().is_empty()),
-        planner_model: get_from_env_unsafe("PLANNER_MODEL")
-            .unwrap_or_else(|_| "Qwen/Qwen3-4B-Instruct-2507".into()),
+        planner: get_from_env_unsafe::<String>("HF_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+            .map(|token| {
+                // Preferences, then any live model (`auto`): see common::models.
+                let spec: String = get_from_env_unsafe("PLANNER_MODEL")
+                    .unwrap_or_else(|_| "meta-llama/Llama-3.1-8B-Instruct,auto".into());
+                Arc::new(ModelPicker::new("https://router.huggingface.co/v1", Some(token), &spec))
+            }),
         token: get_from_env_unsafe::<String>("RUNNER_TOKEN")
             .ok()
             .filter(|t| !t.is_empty()),
@@ -137,6 +145,13 @@ async fn main() -> Result<()> {
         pilot: Arc::new(std::sync::Mutex::new(autopilot::State::default())),
     });
     autopilot::spawn_watcher(Arc::clone(&runner));
+    if let Some(planner) = runner.planner.clone() {
+        tokio::spawn(async move {
+            if let Err(error) = planner.resolve(&[]).await {
+                tracing::warn!(%error, "no planner model answered; compute tasks use rules until one does");
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/v1/runner", get(info))
@@ -204,7 +219,7 @@ async fn info(State(runner): State<Arc<Runner>>) -> Json<Value> {
         "max_atomic": runner.max_atomic,
         "max_output_tokens": runner.max_output_tokens,
         "requires_token": runner.token.is_some(),
-        "planner": runner.hf_token.as_ref().map(|_| runner.planner_model.clone()),
+        "planner": runner.planner.as_ref().map(|p| p.current()),
     }))
 }
 
@@ -445,12 +460,12 @@ async fn plan_job(runner: &Runner, task: &str, offers: &[ComputeOffer]) -> (JobS
     let images: Vec<String> = offers.iter().flat_map(|o| o.images.clone()).collect();
     let max_minutes = offers.iter().map(|o| o.max_minutes).max().unwrap_or(10).max(1);
 
-    if let Some(token) = &runner.hf_token {
-        match ask_planner(runner, token, task, &images, max_minutes).await {
-            Ok(job) if images.contains(&job.image) && (1..=max_minutes).contains(&job.minutes) => {
-                return (job, runner.planner_model.clone(), None);
+    if let Some(planner) = &runner.planner {
+        match ask_planner(planner, task, &images, max_minutes).await {
+            Ok((job, model)) if images.contains(&job.image) && (1..=max_minutes).contains(&job.minutes) => {
+                return (job, model, None);
             }
-            Ok(job) => {
+            Ok((job, _)) => {
                 let note = format!("the model proposed {} for {} min, outside the offer; used rules", job.image, job.minutes);
                 return (rules_plan(task, &images, max_minutes), "rules".into(), Some(note));
             }
@@ -463,7 +478,10 @@ async fn plan_job(runner: &Runner, task: &str, offers: &[ComputeOffer]) -> (JobS
     (rules_plan(task, &images, max_minutes), "rules".into(), None)
 }
 
-async fn ask_planner(runner: &Runner, token: &str, task: &str, images: &[String], max_minutes: u64) -> Result<JobSpec> {
+/// Asks the planner model for a job. If the model has been dropped
+/// upstream, picks another and asks once more. Returns the job and the
+/// model that planned it.
+async fn ask_planner(planner: &ModelPicker, task: &str, images: &[String], max_minutes: u64) -> Result<(JobSpec, String)> {
     let system = format!(
         "You plan container jobs for an infrastructure agent. Reply with one JSON object and nothing else: \
          {{\"image\": string, \"command\": string, \"minutes\": integer}}. \
@@ -472,29 +490,44 @@ async fn ask_planner(runner: &Runner, token: &str, task: &str, images: &[String]
          Keep the process alive for the whole time if the task is a service; print useful output.",
         images.join(", ")
     );
-    let response: Value = reqwest::Client::new()
-        .post("https://router.huggingface.co/v1/chat/completions")
-        .bearer_auth(token)
-        .timeout(Duration::from_secs(25))
-        .json(&json!({
-            "model": runner.planner_model,
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": task },
-            ],
-            "max_tokens": 200,
-            "temperature": 0.2,
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let ask = |model: String| {
+        let system = system.clone();
+        async move {
+            let mut request = reqwest::Client::new()
+                .post(format!("{}/chat/completions", planner.base_url()))
+                .timeout(Duration::from_secs(25))
+                .json(&json!({
+                    "model": model,
+                    "messages": [
+                        { "role": "system", "content": system },
+                        { "role": "user", "content": task },
+                    ],
+                    "max_tokens": 200,
+                    "temperature": 0.2,
+                }));
+            if let Some(key) = planner.api_key() {
+                request = request.bearer_auth(key);
+            }
+            let response = request.send().await?;
+            let status = response.status();
+            let body = response.text().await?;
+            Ok::<_, anyhow::Error>((status, body))
+        }
+    };
+
+    let mut model = planner.current();
+    let (mut status, mut body) = ask(model.clone()).await?;
+    if model_unavailable(status.as_u16(), &body) {
+        model = planner.resolve(std::slice::from_ref(&model)).await?;
+        (status, body) = ask(model.clone()).await?;
+    }
+    anyhow::ensure!(status.is_success(), "planner model answered {status}: {}", body.chars().take(160).collect::<String>());
+    let response: Value = serde_json::from_str(&body).context("planner response wasn't JSON")?;
     let content = response["choices"][0]["message"]["content"].as_str().unwrap_or_default();
     let start = content.find('{').context("no JSON in the planner's answer")?;
     let end = content.rfind('}').context("no JSON in the planner's answer")?;
     let job: JobSpec = serde_json::from_str(&content[start..=end]).context("planner JSON didn't parse")?;
-    Ok(JobSpec { extend: None, ..job })
+    Ok((JobSpec { extend: None, ..job }, model))
 }
 
 /// Keyword rules, for when there's no planner model.
@@ -696,11 +729,14 @@ async fn purchase(runner: &Runner, order: Order<'_>, emit: &impl Fn(Value)) -> R
         return Ok(None);
     }
 
-    // 3. Authorize: Leash's policy engine decides, per provider, cheapest
-    //    first. The first approved quote is the one paid.
-    let mut chosen: Option<&Offer> = None;
+    // 3–5. Authorize, pay, execute: Leash's policy engine decides per
+    //    provider, cheapest first, and the first approved quote is paid. If
+    //    that provider then fails, nothing settled, so the next approved
+    //    quote is tried.
     let mut first_denial: Option<Value> = None;
-    for offer in affordable {
+    let mut failed: usize = 0;
+    let mut bought: Option<(&Offer, Box<InferResponse>, Option<Settlement>)> = None;
+    for (index, offer) in affordable.iter().enumerate() {
         match authorize(offer, agent).await {
             Ok(decision) => {
                 let approved = decision.get("approved").and_then(Value::as_bool).unwrap_or(false);
@@ -710,63 +746,73 @@ async fn purchase(runner: &Runner, order: Order<'_>, emit: &impl Fn(Value)) -> R
                     "quote_id": offer.quote.quote_id,
                     "decision": decision,
                 }));
-                if approved {
-                    chosen = Some(offer);
-                    break;
+                if !approved {
+                    first_denial.get_or_insert(decision);
+                    continue;
                 }
-                first_denial.get_or_insert(decision);
             }
-            Err(error) => emit(json!({
-                "step": "authorization_failed",
-                "provider": offer.manifest.provider,
-                "message": format!("{error:#}"),
-            })),
+            Err(error) => {
+                emit(json!({
+                    "step": "authorization_failed",
+                    "provider": offer.manifest.provider,
+                    "message": format!("{error:#}"),
+                }));
+                continue;
+            }
+        }
+        emit(json!({
+            "step": "selected",
+            "provider": offer.manifest.provider,
+            "amount": offer.quote.amount,
+            "asset": offer.quote.asset,
+            "passed_over": offers.len() - 1,
+            "quote_id": offer.quote.quote_id,
+        }));
+
+        // The gated endpoint re-checks the mandate and names its price
+        // (402), then the signed transfer settles through the facilitator.
+        match client.challenge(offer, agent).await? {
+            Challenge::MandateRejected { reason } => {
+                emit(json!({ "step": "refused", "reason": reason }));
+                return Ok(None);
+            }
+            Challenge::PaymentRequired { requirements } => {
+                emit(json!({ "step": "payment_required", "requirements": requirements }));
+            }
+        }
+        emit(json!({ "step": "paying", "payer": runner.wallet.account_id.to_string() }));
+        let outcome = match client.purchase(offer, agent, budget).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                emit(json!({ "step": "payment_failed", "message": format!("{error:#}") }));
+                return Ok(None);
+            }
+        };
+        match outcome {
+            PurchaseOutcome::MandateRejected { reason } => {
+                emit(json!({ "step": "refused", "reason": reason }));
+                return Ok(None);
+            }
+            PurchaseOutcome::ServiceFailed { reason } => {
+                failed += 1;
+                emit(json!({
+                    "step": "service_failed",
+                    "provider": offer.manifest.provider,
+                    "reason": reason,
+                    "trying_next": index + 1 < affordable.len(),
+                }));
+            }
+            PurchaseOutcome::Approved { result, settlement } => {
+                bought = Some((offer, result, settlement));
+                break;
+            }
         }
     }
-    let Some(chosen) = chosen else {
-        emit(json!({ "step": "denied", "decision": first_denial }));
+    let Some((chosen, result, settlement)) = bought else {
+        if failed == 0 {
+            emit(json!({ "step": "denied", "decision": first_denial }));
+        }
         return Ok(None);
-    };
-    emit(json!({
-        "step": "selected",
-        "provider": chosen.manifest.provider,
-        "amount": chosen.quote.amount,
-        "asset": chosen.quote.asset,
-        "passed_over": offers.len() - 1,
-        "quote_id": chosen.quote.quote_id,
-    }));
-
-    // 4. Pay: the gated endpoint re-checks the mandate and names its price
-    //    (402), then the signed transfer settles through the facilitator.
-    match client.challenge(chosen, agent).await? {
-        Challenge::MandateRejected { reason } => {
-            emit(json!({ "step": "refused", "reason": reason }));
-            return Ok(None);
-        }
-        Challenge::PaymentRequired { requirements } => {
-            emit(json!({ "step": "payment_required", "requirements": requirements }));
-        }
-    }
-    emit(json!({ "step": "paying", "payer": runner.wallet.account_id.to_string() }));
-    let outcome = match client.purchase(chosen, agent, budget).await {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            emit(json!({ "step": "payment_failed", "message": format!("{error:#}") }));
-            return Ok(None);
-        }
-    };
-
-    // 5. Execute and return the result.
-    let (result, settlement) = match outcome {
-        PurchaseOutcome::MandateRejected { reason } => {
-            emit(json!({ "step": "refused", "reason": reason }));
-            return Ok(None);
-        }
-        PurchaseOutcome::ServiceFailed { reason } => {
-            emit(json!({ "step": "service_failed", "reason": reason }));
-            return Ok(None);
-        }
-        PurchaseOutcome::Approved { result, settlement } => (result, settlement),
     };
     if let Some(s) = &settlement {
         emit(json!({

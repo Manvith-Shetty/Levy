@@ -18,6 +18,7 @@ use axum::routing::{get, post};
 use gateway::env::{Config, MandateMode};
 use gateway::hcs::{self, ReceiptHook, ReceiptLog};
 use gateway::compute::Broker;
+use common::models::ModelPicker;
 use gateway::ops::Ops;
 use gateway::ledger::SpendLedger;
 use gateway::mandate_guard::{self, AnyResolver};
@@ -38,7 +39,22 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cfg = Arc::new(Config::from_env().map_err(|e| anyhow::anyhow!(e))?);
+    let mut cfg = Config::from_env().map_err(|e| anyhow::anyhow!(e))?;
+
+    // The model: the first of the configured preferences that the upstream's
+    // live catalog lists and that answers — re-picked whenever it stops
+    // being served, so a model dropped upstream doesn't take this down.
+    let models = cfg
+        .upstream
+        .as_ref()
+        .map(|u| Arc::new(ModelPicker::new(&u.base_url, u.api_key.clone(), &u.model)));
+    if let Some(models) = &models {
+        match models.resolve(&[]).await {
+            Ok(model) => cfg.model = model,
+            Err(error) => tracing::warn!(%error, "no model answered yet; requests will keep trying"),
+        }
+    }
+    let cfg = Arc::new(cfg);
     let quotes = Arc::new(QuoteStore::new(cfg.quote_ttl_secs));
     let receipts = Arc::new(ReceiptLog::default());
 
@@ -172,6 +188,7 @@ async fn main() -> Result<()> {
         ledger,
         broker: broker.clone(),
         ops,
+        models,
     };
 
     if let Some(broker) = broker {

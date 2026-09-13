@@ -80,6 +80,7 @@ export interface IncidentStep {
   topic?: string | null
   sequence?: number
   count?: number
+  trying_next?: boolean
 }
 
 export type IncidentStatus = 'diagnosing' | 'fixing' | 'verifying' | 'resolved' | 'blocked' | 'failed'

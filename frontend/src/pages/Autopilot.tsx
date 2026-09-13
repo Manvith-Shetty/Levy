@@ -418,10 +418,11 @@ function stepVerb(step?: IncidentStep): string | null {
 
 // ─── Policies ────────────────────────────────────────────────────────────
 
+/** `null` when the policy engine couldn't be asked. */
 interface Grant {
-  diagnoseInference?: PolicyDecision
-  diagnoseOps?: PolicyDecision
-  fixOps?: PolicyDecision
+  diagnoseInference?: PolicyDecision | null
+  diagnoseOps?: PolicyDecision | null
+  fixOps?: PolicyDecision | null
 }
 
 function usePermissions(state: AutopilotState, refreshKey: string): Grant | null {
@@ -431,7 +432,7 @@ function usePermissions(state: AutopilotState, refreshKey: string): Grant | null
   useEffect(() => {
     let cancelled = false
     const check = (agent: string, service: string, amount: number) =>
-      authorize({ agent, amount, service }).catch(() => undefined)
+      authorize({ agent, amount, service }).catch(() => null)
     Promise.all([check(diagnose, 'inference', 1_000), check(diagnose, 'ops', perAction), check(fix, 'ops', perAction)]).then(
       ([diagnoseInference, diagnoseOps, fixOps]) => !cancelled && setGrant({ diagnoseInference, diagnoseOps, fixOps }),
     )
@@ -488,8 +489,9 @@ function Permissions({ state, incident }: { state: AutopilotState; incident: Inc
 }
 
 /** A policy answer as one line. `mustNot` marks what the agent shouldn't be able to buy. */
-function decisionLine(what: string, decision: PolicyDecision | undefined, mustNot = false): { text: string; ok?: boolean } {
-  if (!decision) return { text: `${what}: checking…` }
+function decisionLine(what: string, decision: PolicyDecision | null | undefined, mustNot = false): { text: string; ok?: boolean } {
+  if (decision === undefined) return { text: `${what}: checking…` }
+  if (decision === null) return { text: `${what}: couldn't ask the policy engine (is the gateway on 4021 up?)` }
   if (mustNot)
     return decision.approved
       ? { text: `${what}: allowed, so it could act on its own diagnosis`, ok: false }
@@ -677,13 +679,36 @@ function DetectLane({ incident }: { incident: Incident }) {
   )
 }
 
+/** What was paid, and to whom — only once a payment has settled. Providers
+ *  that failed before it (unpaid) are listed first. */
 function Paid({ steps, fmt }: { steps: IncidentStep[]; fmt: (a?: number, asset?: AssetInfo) => string }) {
-  const selected = find(steps, 'selected')
+  const selected = [...steps].reverse().find((s) => s.step === 'selected')
   const settled = find(steps, 'settled')
   const audited = find(steps, 'audited')
   const pending = find(steps, 'audit_pending')
+  const failures = steps.filter((s) => s.step === 'service_failed')
+  const failedLines = failures.map((f, i) => (
+    <p key={i} className="text-warn">
+      {f.provider ?? 'The provider'} failed, so it wasn't charged{f.trying_next ? '; trying the next approved quote.' : '.'}
+    </p>
+  ))
   if (!selected) return null
+  if (!settled) {
+    const lastFailed = failures.length > 0 && steps.lastIndexOf(failures[failures.length - 1]) > steps.lastIndexOf(selected)
+    return (
+      <>
+        {failedLines}
+        {!lastFailed && (
+          <p className="text-muted">
+            Paying <span className="numeric text-ink">{fmt(selected.amount, selected.asset)}</span> to {selected.provider}…
+          </p>
+        )}
+      </>
+    )
+  }
   return (
+    <>
+    {failedLines}
     <p className="text-muted">
       Paid <span className="numeric text-ink">{fmt(selected.amount, selected.asset)}</span> to {selected.provider}
       {settled?.transaction && (
@@ -702,8 +727,9 @@ function Paid({ steps, fmt }: { steps: IncidentStep[]; fmt: (a?: number, asset?:
           </a>
         </>
       )}
-      {settled && !audited && !pending && ' · receipt reaching HCS…'}
+      {!audited && !pending && ' · receipt reaching HCS…'}
     </p>
+    </>
   )
 }
 
@@ -718,7 +744,7 @@ function stopped(steps: IncidentStep[], fmt: (a?: number, asset?: AssetInfo) => 
       case 'refused':
         return `The provider refused: ${s.reason}`
       case 'service_failed':
-        return `The provider failed (not charged): ${s.reason}`
+        return s.trying_next ? null : `No provider could serve it, so nothing was charged. Last error: ${s.reason}`
       case 'payment_failed':
       case 'error':
         return s.message ?? 'Failed'
@@ -790,11 +816,9 @@ function FixLane({ incident, fmt }: { incident: Incident; fmt: (a?: number, asse
                 <code className="rounded border border-line bg-sunken px-1.5 py-0.5 font-mono text-[11.5px] text-ink">{label(order.action)}</code>
               </p>
             )}
-            {auth?.decision && (
-              <p className={auth.decision.approved ? 'text-authority' : 'text-blocked'}>
-                {auth.decision.approved
-                  ? `Policy approved: ${auth.decision.checks.filter((c) => c.status === 'pass').length} checks passed`
-                  : `Policy denied: ${auth.decision.reason}`}
+            {auth?.decision?.approved && (
+              <p className="text-authority">
+                Policy approved: {auth.decision.checks.filter((c) => c.status === 'pass').length} checks passed
               </p>
             )}
             <Paid steps={g} fmt={fmt} />

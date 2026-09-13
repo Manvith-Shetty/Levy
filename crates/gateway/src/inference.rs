@@ -2,16 +2,16 @@
 //!
 //! Either an OpenAI-compatible upstream — Hugging Face's router when
 //! `HF_TOKEN` is set, or any server at `OPENAI_BASE_URL` (LM Studio, Ollama,
-//! vLLM) — or a deterministic local stub so the payment flow can be demoed
+//! vLLM), on whichever model `common::models` picked from its live catalog —
+//! or a deterministic local stub so the payment flow can be demoed
 //! without a model. What matters for x402 is that the handler runs only after
 //! payment is verified, and that settlement waits for it: if the model fails,
 //! the handler answers 502 and the payment is never settled.
 
 use anyhow::{Context, Result};
+use common::models::{ModelPicker, model_unavailable};
 use meter::{Usage, count_tokens};
 use serde::Deserialize;
-
-use crate::env::Upstream;
 
 /// A generated completion plus its token accounting.
 #[derive(Debug, Clone)]
@@ -20,6 +20,8 @@ pub struct Completion {
     pub text: String,
     /// Tokens consumed by this request.
     pub usage: Usage,
+    /// Model that produced it.
+    pub model: String,
 }
 
 #[derive(Deserialize)]
@@ -44,36 +46,71 @@ struct ApiUsage {
     completion_tokens: Option<u64>,
 }
 
-/// Runs `prompt`, capping generation at `max_output_tokens`.
+/// Runs `prompt`, capping generation at `max_output_tokens`, on the model
+/// the picker has chosen. If that model is no longer served, picks another
+/// and retries once — the payment settles only after this returns.
 ///
 /// # Errors
 ///
-/// Returns an error when a configured upstream is unreachable or returns a
-/// non-success status.
+/// Returns an error when the upstream is unreachable, returns a
+/// non-success status, or no model answers.
 pub async fn run(
-    upstream: Option<&Upstream>,
-    model: &str,
+    models: Option<&ModelPicker>,
+    stub_model: &str,
     prompt: &str,
     max_output_tokens: u64,
 ) -> Result<Completion> {
-    match upstream {
-        Some(upstream) => run_upstream(upstream, prompt, max_output_tokens).await,
-        None => Ok(run_stub(model, prompt, max_output_tokens)),
+    let Some(models) = models else {
+        return Ok(run_stub(stub_model, prompt, max_output_tokens));
+    };
+    let model = models.current();
+    match run_upstream(models, &model, prompt, max_output_tokens).await {
+        Err(Failure::ModelGone(why)) => {
+            tracing::warn!(%model, %why, "model no longer served; picking another");
+            let next = models
+                .resolve(std::slice::from_ref(&model))
+                .await
+                .with_context(|| format!("{model} is no longer served"))?;
+            run_upstream(models, &next, prompt, max_output_tokens).await.map_err(Failure::into_error)
+        }
+        other => other.map_err(Failure::into_error),
+    }
+}
+
+enum Failure {
+    /// The upstream doesn't serve this model (any more).
+    ModelGone(String),
+    Other(anyhow::Error),
+}
+
+impl Failure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::ModelGone(why) => anyhow::anyhow!("model not served: {why}"),
+            Self::Other(error) => error,
+        }
+    }
+}
+
+impl From<anyhow::Error> for Failure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Other(error)
     }
 }
 
 async fn run_upstream(
-    upstream: &Upstream,
+    models: &ModelPicker,
+    model: &str,
     prompt: &str,
     max_output_tokens: u64,
-) -> Result<Completion> {
-    let url = format!("{}/chat/completions", upstream.base_url.trim_end_matches('/'));
+) -> Result<Completion, Failure> {
+    let url = format!("{}/chat/completions", models.base_url());
     let mut request = reqwest::Client::new().post(&url).json(&serde_json::json!({
-        "model": upstream.model,
+        "model": model,
         "messages": [{ "role": "user", "content": prompt }],
         "max_tokens": max_output_tokens,
     }));
-    if let Some(key) = &upstream.api_key {
+    if let Some(key) = models.api_key() {
         request = request.bearer_auth(key);
     }
 
@@ -83,7 +120,12 @@ async fn run_upstream(
         .with_context(|| format!("upstream request to {url} failed"))?;
     let status = response.status();
     let body = response.text().await.context("reading upstream body")?;
-    anyhow::ensure!(status.is_success(), "upstream returned {status}: {body}");
+    if !status.is_success() {
+        if model_unavailable(status.as_u16(), &body) {
+            return Err(Failure::ModelGone(format!("{status}: {}", body.chars().take(200).collect::<String>())));
+        }
+        return Err(anyhow::anyhow!("upstream returned {status}: {body}").into());
+    }
 
     let parsed: ChatResponse = serde_json::from_str(&body).context("parsing upstream body")?;
     let text = strip_reasoning(
@@ -94,7 +136,9 @@ async fn run_upstream(
             .map(|c| c.message.content)
             .unwrap_or_default(),
     );
-    anyhow::ensure!(!text.is_empty(), "upstream returned an empty completion");
+    if text.is_empty() {
+        return Err(anyhow::anyhow!("upstream returned an empty completion").into());
+    }
 
     let usage = parsed.usage.map_or_else(
         || Usage {
@@ -107,7 +151,7 @@ async fn run_upstream(
         },
     );
 
-    Ok(Completion { text, usage })
+    Ok(Completion { text, usage, model: model.to_owned() })
 }
 
 /// Drops a `<think>…</think>` block some reasoning models put before the
@@ -159,6 +203,7 @@ fn run_stub(model: &str, prompt: &str, max_output_tokens: u64) -> Completion {
             output_tokens: count_tokens(&text),
         },
         text,
+        model: model.to_owned(),
     }
 }
 

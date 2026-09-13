@@ -75,6 +75,10 @@ function reduce(run: Run, step: RunStep): Run {
       return { ...run, paymentFailed: step }
     case 'service_failed':
       return { ...run, serviceFailed: step }
+    case 'selected':
+      // A later selection is the next approved quote, tried after a provider
+      // failed (unpaid): the new attempt replaces the failed one.
+      return { ...run, selected: step, serviceFailed: undefined, challenge: undefined, paying: undefined }
     case 'audit_pending':
       return { ...run, auditPending: step }
     case 'error':

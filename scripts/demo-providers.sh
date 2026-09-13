@@ -26,8 +26,10 @@ stop() {
   fi
 }
 
-# $8 is the Hugging Face model this provider serves when HF_TOKEN is set in
-# .env; "stub" blanks HF_TOKEN for that provider, so it always uses the stub.
+# $8 is the Hugging Face models this provider prefers, in order, when HF_TOKEN
+# is set in .env ("a,b,auto": the gateway serves the first one the router's
+# live catalog lists and that answers, and moves on if it's dropped);
+# "stub" blanks HF_TOKEN for that provider, so it always uses the stub.
 start() {
   local name=$1 port=$2 category=$3 model=$4 input=$5 output=$6 minimum=$7 hf_model=${8:-}
   local hf=()
@@ -50,10 +52,10 @@ fi
 [ -x "$bin" ] || cargo build -p gateway
 
 # USDC atomic units (6 decimals) per 1k tokens. Provider A (4021) is 1000 / 4000
-# and serves HF_MODEL from .env (default meta-llama/Llama-3.1-8B-Instruct).
+# and prefers HF_MODEL from .env (default meta-llama/Llama-3.1-8B-Instruct,auto).
 # With HF_TOKEN set, B and C serve real models; without it, all use the stub.
-start leash-provider-b 4022 inference echo-mini 600 2500 100 Qwen/Qwen3-4B-Instruct-2507
-start leash-provider-c 4023 inference echo-pro 2000 8000 100 Qwen/Qwen3-235B-A22B-Instruct-2507
+start leash-provider-b 4022 inference echo-mini 600 2500 100 google/gemma-3-27b-it,meta-llama/Llama-3.1-8B-Instruct,auto
+start leash-provider-c 4023 inference echo-pro 2000 8000 100 Qwen/Qwen3-235B-A22B-Instruct-2507,google/gemma-3-27b-it,auto
 # Compute: real containers on local Docker, $0.0002 a minute, prepaid and torn
 # down when the time runs out (COMPUTE_* in .env tunes images and limits).
 stop leash-provider-d   # the old stub compute provider, if it's still up

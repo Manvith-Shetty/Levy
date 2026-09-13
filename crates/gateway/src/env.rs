@@ -112,18 +112,21 @@ fn non_empty(key: &str) -> Option<String> {
 
 /// Hugging Face Inference Providers' OpenAI-compatible router.
 pub const HF_ROUTER: &str = "https://router.huggingface.co/v1";
-/// A small, cheap instruct model the router serves from several providers.
-pub const HF_DEFAULT_MODEL: &str = "meta-llama/Llama-3.1-8B-Instruct";
+/// Default preferences: a small, cheap instruct model several providers
+/// serve, then whatever the live catalog has (see `common::models`).
+pub const HF_DEFAULT_MODEL: &str = "meta-llama/Llama-3.1-8B-Instruct,auto";
 
 /// The model server behind the paywall, most explicit first:
 /// `OPENAI_BASE_URL` (LM Studio, Ollama, vLLM, any OpenAI-compatible server),
-/// then `HF_TOKEN` (Hugging Face's router, model from `HF_MODEL`), else none
-/// and the deterministic stub answers.
+/// then `HF_TOKEN` (Hugging Face's router, models from `HF_MODEL`), else none
+/// and the deterministic stub answers. `OPENAI_MODEL` / `HF_MODEL` are
+/// preference lists (`a,b,auto`); the gateway picks from the server's live
+/// catalog at start and again whenever a model stops being served.
 fn upstream_from_env() -> Option<Upstream> {
     if let Some(base_url) = non_empty("OPENAI_BASE_URL") {
         return Some(Upstream {
             base_url,
-            model: non_empty("OPENAI_MODEL").unwrap_or_else(|| "local-model".into()),
+            model: non_empty("OPENAI_MODEL").unwrap_or_else(|| "auto".into()),
             api_key: non_empty("OPENAI_API_KEY"),
         });
     }
@@ -149,7 +152,8 @@ fn describe(category: &str) -> &'static str {
 pub struct Upstream {
     /// Base URL including `/v1`.
     pub base_url: String,
-    /// Model name as the upstream knows it.
+    /// Models to use, in order of preference (`a,b,auto`), as the upstream
+    /// names them. The one in use is picked at run time.
     pub model: String,
     /// Bearer token, if the upstream wants one.
     pub api_key: Option<String>,
@@ -281,7 +285,8 @@ impl Config {
             provider: get_from_env_unsafe("PROVIDER_NAME").unwrap_or_else(|_| "provider-a".into()),
             model: upstream.as_ref().map_or_else(
                 || get_from_env_unsafe("MODEL").unwrap_or_else(|_| "echo-1".into()),
-                |u| u.model.clone(),
+                // The first preference until the model picker has run.
+                |u| u.model.split(',').next().unwrap_or_default().trim().to_owned(),
             ),
             port,
             base_url: Url::parse(&base_url).map_err(|e| format!("BASE_URL must be a valid URL: {e}"))?,

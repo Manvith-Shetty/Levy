@@ -48,6 +48,16 @@ pub struct AppState {
     pub broker: Option<Arc<Broker>>,
     /// The Compose stack this provider repairs, when `OPS_COMPOSE_FILE` is set.
     pub ops: Option<Arc<Ops>>,
+    /// Picks the upstream model, when there's an upstream.
+    pub models: Option<Arc<common::models::ModelPicker>>,
+}
+
+impl AppState {
+    /// The model being served now: the picker's choice, else the configured name.
+    #[must_use]
+    pub fn model(&self) -> String {
+        self.models.as_ref().map_or_else(|| self.config.model.clone(), |m| m.current())
+    }
 }
 
 pub(crate) fn error(status: StatusCode, message: &str) -> Response {
@@ -59,7 +69,7 @@ pub async fn manifest(State(state): State<AppState>) -> Json<ServiceManifest> {
     let cfg = &state.config;
     Json(ServiceManifest {
         provider: cfg.provider.clone(),
-        model: cfg.model.clone(),
+        model: state.model(),
         base_url: cfg.base_url.to_string(),
         quote_url: cfg.quote_url(),
         infer_url: cfg.infer_url(),
@@ -99,7 +109,7 @@ pub async fn quote(State(state): State<AppState>, Json(body): Json<QuoteRequest>
             infer_url: format!("{}?quote={quote_id}", cfg.infer_url()),
             quote_id,
             provider: cfg.provider.clone(),
-            model: cfg.model.clone(),
+            model: state.model(),
             input_tokens: 0,
             max_output_tokens: 0,
             amount,
@@ -127,7 +137,7 @@ pub async fn quote(State(state): State<AppState>, Json(body): Json<QuoteRequest>
             infer_url: format!("{}?quote={quote_id}", cfg.infer_url()),
             quote_id,
             provider: cfg.provider.clone(),
-            model: cfg.model.clone(),
+            model: state.model(),
             input_tokens: 0,
             max_output_tokens: minutes,
             amount,
@@ -159,7 +169,7 @@ pub async fn quote(State(state): State<AppState>, Json(body): Json<QuoteRequest>
         infer_url: format!("{}?quote={quote_id}", cfg.infer_url()),
         quote_id,
         provider: cfg.provider.clone(),
-        model: cfg.model.clone(),
+        model: state.model(),
         input_tokens,
         max_output_tokens,
         amount,
@@ -215,7 +225,7 @@ pub async fn infer(State(state): State<AppState>, Query(query): Query<InferQuery
                 Json(InferResponse {
                     quote_id,
                     provider: cfg.provider.clone(),
-                    model: cfg.model.clone(),
+                    model: state.model(),
                     completion: what,
                     usage: Usage { input_tokens: 0, output_tokens: 0 },
                     charged: quote.amount,
@@ -254,7 +264,7 @@ pub async fn infer(State(state): State<AppState>, Query(query): Query<InferQuery
                 Json(InferResponse {
                     quote_id,
                     provider: cfg.provider.clone(),
-                    model: cfg.model.clone(),
+                    model: state.model(),
                     completion: what,
                     usage: Usage { input_tokens: 0, output_tokens: 0 },
                     charged: quote.amount,
@@ -272,7 +282,7 @@ pub async fn infer(State(state): State<AppState>, Query(query): Query<InferQuery
     }
 
     let completion = match inference::run(
-        cfg.upstream.as_ref(),
+        state.models.as_deref(),
         &cfg.model,
         &quote.prompt,
         quote.max_output_tokens,
@@ -297,7 +307,7 @@ pub async fn infer(State(state): State<AppState>, Query(query): Query<InferQuery
     Json(InferResponse {
         quote_id,
         provider: cfg.provider.clone(),
-        model: cfg.model.clone(),
+        model: completion.model,
         completion: completion.text,
         usage: Usage {
             input_tokens: completion.usage.input_tokens,
