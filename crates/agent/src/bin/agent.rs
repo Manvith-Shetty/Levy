@@ -94,6 +94,9 @@ async fn main() -> Result<()> {
         PurchaseOutcome::MandateRejected { reason } => {
             println!("  REJECTED  {reason}");
         }
+        PurchaseOutcome::ServiceFailed { reason } => {
+            println!("  SERVICE FAILED  {reason} (not settled, nothing paid)");
+        }
         PurchaseOutcome::Approved { result, settlement } => {
             match &settlement {
                 Some(s) => {

@@ -1,9 +1,11 @@
 //! The work being sold.
 //!
-//! Either an OpenAI-compatible upstream (LM Studio, Ollama, vLLM) when
-//! `OPENAI_BASE_URL` is set, or a deterministic local stub so the payment flow
-//! can be demoed without a GPU. What matters for x402 is that the handler runs
-//! only after payment is verified.
+//! Either an OpenAI-compatible upstream — Hugging Face's router when
+//! `HF_TOKEN` is set, or any server at `OPENAI_BASE_URL` (LM Studio, Ollama,
+//! vLLM) — or a deterministic local stub so the payment flow can be demoed
+//! without a model. What matters for x402 is that the handler runs only after
+//! payment is verified, and that settlement waits for it: if the model fails,
+//! the handler answers 502 and the payment is never settled.
 
 use anyhow::{Context, Result};
 use meter::{Usage, count_tokens};
@@ -84,12 +86,15 @@ async fn run_upstream(
     anyhow::ensure!(status.is_success(), "upstream returned {status}: {body}");
 
     let parsed: ChatResponse = serde_json::from_str(&body).context("parsing upstream body")?;
-    let text = parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .unwrap_or_default();
+    let text = strip_reasoning(
+        &parsed
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .unwrap_or_default(),
+    );
+    anyhow::ensure!(!text.is_empty(), "upstream returned an empty completion");
 
     let usage = parsed.usage.map_or_else(
         || Usage {
@@ -103,6 +108,19 @@ async fn run_upstream(
     );
 
     Ok(Completion { text, usage })
+}
+
+/// Drops a `<think>…</think>` block some reasoning models put before the
+/// answer, so the buyer gets the answer.
+fn strip_reasoning(text: &str) -> String {
+    match (text.find("<think>"), text.find("</think>")) {
+        (Some(start), Some(end)) if end > start => {
+            format!("{}{}", &text[..start], &text[end + "</think>".len()..])
+                .trim()
+                .to_owned()
+        }
+        _ => text.trim().to_owned(),
+    }
 }
 
 /// Deterministic stand-in model: no network, no weights, but a real per-request
@@ -125,7 +143,7 @@ fn run_stub(model: &str, prompt: &str, max_output_tokens: u64) -> Completion {
     text.push_str(
         "This completion was produced only because an x402 payment settled on \
          Hedera first: the gate verified a payer-signed TransferTransaction \
-         before this handler ran. Point OPENAI_BASE_URL at a local model server \
+         before this handler ran. Set HF_TOKEN (Hugging Face) or OPENAI_BASE_URL \
          to replace this stub with real inference.",
     );
 
@@ -147,6 +165,13 @@ fn run_stub(model: &str, prompt: &str, max_output_tokens: u64) -> Completion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_blocks_are_dropped_from_the_answer() {
+        assert_eq!(strip_reasoning("<think>hmm, ok</think>\n\nThe answer."), "The answer.");
+        assert_eq!(strip_reasoning("  Plain answer. "), "Plain answer.");
+        assert_eq!(strip_reasoning("<think>unterminated"), "<think>unterminated");
+    }
 
     #[test]
     fn stub_respects_the_output_budget() {

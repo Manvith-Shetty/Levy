@@ -36,6 +36,7 @@ interface Run {
   refused?: Of<'refused'>
   paying?: Of<'paying'>
   paymentFailed?: Of<'payment_failed'>
+  serviceFailed?: Of<'service_failed'>
   settled?: Of<'settled'>
   result?: Of<'result'>
   audited?: Of<'audited'>
@@ -64,6 +65,8 @@ function reduce(run: Run, step: RunStep): Run {
       return { ...run, challenge: step }
     case 'payment_failed':
       return { ...run, paymentFailed: step }
+    case 'service_failed':
+      return { ...run, serviceFailed: step }
     case 'audit_pending':
       return { ...run, auditPending: step }
     case 'error':
@@ -86,6 +89,7 @@ function lifecycle(run: Run, running: boolean): { label: string; tone: 'active' 
     }
   }
   if (run.paymentFailed) return { label: 'Payment failed', tone: 'bad' }
+  if (run.serviceFailed) return { label: 'Service failed', tone: 'bad' }
   if (run.settled && !run.result && !running) return { label: 'Service failed', tone: 'bad' }
   if (run.audited) return { label: 'Audited', tone: 'ok' }
   if (run.result) {
@@ -426,7 +430,7 @@ export function RunAgentModal({
                 n={4}
                 title="Pay"
                 state={
-                  run.paymentFailed || (run.refused && !run.settled)
+                  run.paymentFailed || run.serviceFailed || (run.refused && !run.settled)
                     ? 'failed'
                     : run.settled
                       ? 'done'
@@ -443,7 +447,12 @@ export function RunAgentModal({
                     shared wallet and Blocky402 settled it on Hedera{req.feePayer ? ', paying the network fee' : ''}.
                   </p>
                 )}
-                {run.paying && !run.settled && !run.paymentFailed && (
+                {run.serviceFailed && (
+                  <p className="mt-1 text-[12.5px] text-muted">
+                    Not settled: the provider only takes payment after the service succeeds, so nothing was paid.
+                  </p>
+                )}
+                {run.paying && !run.settled && !run.paymentFailed && !run.serviceFailed && (
                   <p className="mt-1 text-[12.5px] text-muted">Waiting for settlement…</p>
                 )}
                 {run.settled && (
@@ -472,8 +481,19 @@ export function RunAgentModal({
               <Stage
                 n={5}
                 title="Execute"
-                state={run.result ? 'done' : run.settled && !running ? 'failed' : run.settled ? 'active' : 'idle'}
+                state={
+                  run.result
+                    ? 'done'
+                    : run.serviceFailed || (run.settled && !running)
+                      ? 'failed'
+                      : run.settled || (run.paying && running)
+                        ? 'active'
+                        : 'idle'
+                }
               >
+                {run.serviceFailed && (
+                  <p className="text-[12.5px] text-blocked">The service failed: {run.serviceFailed.reason}.</p>
+                )}
                 {run.settled && !run.result && running && (
                   <p className="text-[12.5px] text-muted">Payment confirmed. Running the service…</p>
                 )}

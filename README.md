@@ -90,8 +90,13 @@ flowchart LR
 - **`crates/gateway`**: the paid service. `GET /.well-known/x402` is the
   manifest (discovery), `POST /v1/quote` prices a prompt, and `POST /v1/infer`
   is gated by the mandate guard and then the x402 layer. It publishes receipts
-  and refusals to HCS. It serves an OpenAI-compatible upstream when
-  `OPENAI_BASE_URL` is set, and a deterministic stub otherwise.
+  and refusals to HCS. The model behind the paywall is real when `HF_TOKEN`
+  is set: Hugging Face's Inference Providers router (`HF_MODEL`, default
+  `meta-llama/Llama-3.1-8B-Instruct`; the demo providers serve Qwen3 4B and
+  Qwen3 235B). Any OpenAI-compatible server works via `OPENAI_BASE_URL`, and a
+  deterministic stub answers when neither is set. Payment settles only after
+  the model answers: if it fails, the gateway returns 502 and nothing is
+  charged.
 - **`crates/agent`**: the buyer. `agent` is the CLI; `agent-runner` is the same
   flow behind HTTP, streaming each step to the dashboard as server-sent events.
   Both hold the shared wallet key. The browser never sees it.

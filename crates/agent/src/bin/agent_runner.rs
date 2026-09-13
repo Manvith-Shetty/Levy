@@ -551,6 +551,10 @@ async fn purchase(
             emit(json!({ "step": "refused", "reason": reason }));
             return Ok(());
         }
+        PurchaseOutcome::ServiceFailed { reason } => {
+            emit(json!({ "step": "service_failed", "reason": reason }));
+            return Ok(());
+        }
         PurchaseOutcome::Approved { result, settlement } => (result, settlement),
     };
     if let Some(s) = &settlement {

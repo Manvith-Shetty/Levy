@@ -100,6 +100,40 @@ impl DripEnv {
     }
 }
 
+/// Non-empty value of `key`, if set. An empty value counts as unset, so a
+/// variable can be blanked for one process (`HF_TOKEN= gateway`) even when
+/// `.env` sets it.
+fn non_empty(key: &str) -> Option<String> {
+    get_from_env_unsafe::<String>(key)
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+/// Hugging Face Inference Providers' OpenAI-compatible router.
+pub const HF_ROUTER: &str = "https://router.huggingface.co/v1";
+/// A small, cheap instruct model the router serves from several providers.
+pub const HF_DEFAULT_MODEL: &str = "meta-llama/Llama-3.1-8B-Instruct";
+
+/// The model server behind the paywall, most explicit first:
+/// `OPENAI_BASE_URL` (LM Studio, Ollama, vLLM, any OpenAI-compatible server),
+/// then `HF_TOKEN` (Hugging Face's router, model from `HF_MODEL`), else none
+/// and the deterministic stub answers.
+fn upstream_from_env() -> Option<Upstream> {
+    if let Some(base_url) = non_empty("OPENAI_BASE_URL") {
+        return Some(Upstream {
+            base_url,
+            model: non_empty("OPENAI_MODEL").unwrap_or_else(|| "local-model".into()),
+            api_key: non_empty("OPENAI_API_KEY"),
+        });
+    }
+    non_empty("HF_TOKEN").map(|token| Upstream {
+        base_url: non_empty("HF_BASE_URL").unwrap_or_else(|| HF_ROUTER.into()),
+        model: non_empty("HF_MODEL").unwrap_or_else(|| HF_DEFAULT_MODEL.into()),
+        api_key: Some(token),
+    })
+}
+
 /// Default one-liner for a service category.
 fn describe(category: &str) -> &'static str {
     match category {
@@ -240,13 +274,7 @@ impl Config {
             format!("PAYMENT_ACCOUNT_ID is required (the account payments credit): {e}")
         })?;
 
-        let upstream = get_from_env_unsafe::<String>("OPENAI_BASE_URL")
-            .ok()
-            .map(|base_url| Upstream {
-                base_url,
-                model: get_from_env_unsafe("OPENAI_MODEL").unwrap_or_else(|_| "local-model".into()),
-                api_key: get_from_env_unsafe("OPENAI_API_KEY").ok(),
-            });
+        let upstream = upstream_from_env();
 
         Ok(Self {
             provider: get_from_env_unsafe("PROVIDER_NAME").unwrap_or_else(|_| "provider-a".into()),

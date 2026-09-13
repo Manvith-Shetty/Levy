@@ -74,6 +74,13 @@ pub enum PurchaseOutcome {
         /// Which ancestor failed and why, as reported by `MandateViolation`.
         reason: String,
     },
+    /// Payment was authorized but the service itself failed (the model
+    /// backend didn't answer). Settlement only happens after the handler
+    /// succeeds, so nothing was paid.
+    ServiceFailed {
+        /// The provider's error.
+        reason: String,
+    },
 }
 
 /// What the gated endpoint says before any payment is attached.
@@ -238,6 +245,15 @@ impl Client {
         // different status, so this check is unambiguous.
         if status == reqwest::StatusCode::FORBIDDEN {
             return Ok(PurchaseOutcome::MandateRejected {
+                reason: rejection_reason(body),
+            });
+        }
+
+        // The gateway answers 502 when its model backend fails; x402 settles
+        // only after a successful handler, so this is a failed service, not a
+        // charged one.
+        if status == reqwest::StatusCode::BAD_GATEWAY {
+            return Ok(PurchaseOutcome::ServiceFailed {
                 reason: rejection_reason(body),
             });
         }

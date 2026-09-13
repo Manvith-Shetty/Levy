@@ -25,12 +25,16 @@ stop() {
   fi
 }
 
+# $8 is the Hugging Face model this provider serves when HF_TOKEN is set in
+# .env; "stub" blanks HF_TOKEN for that provider, so it always uses the stub.
 start() {
-  local name=$1 port=$2 category=$3 model=$4 input=$5 output=$6 minimum=$7
+  local name=$1 port=$2 category=$3 model=$4 input=$5 output=$6 minimum=$7 hf_model=${8:-}
+  local hf=()
+  if [ "$hf_model" = "stub" ]; then hf=(HF_TOKEN=); elif [ -n "$hf_model" ]; then hf=(HF_MODEL="$hf_model"); fi
   stop "$name"
-  PROVIDER_NAME=$name PORT=$port BASE_URL=http://localhost:$port MODEL=$model \
+  env PROVIDER_NAME=$name PORT=$port BASE_URL=http://localhost:$port MODEL=$model \
     SERVICE_CATEGORY=$category INPUT_PRICE_PER_1K=$input OUTPUT_PRICE_PER_1K=$output MIN_PAYMENT=$minimum \
-    nohup "$bin" > "/tmp/$name.log" 2>&1 &
+    ${hf[@]+"${hf[@]}"} nohup "$bin" > "/tmp/$name.log" 2>&1 &
   echo $! > "/tmp/$name.pid"
   echo "$name  $category  http://localhost:$port  pid $!"
 }
@@ -42,8 +46,10 @@ fi
 
 [ -x "$bin" ] || cargo build -p gateway
 
-# USDC atomic units (6 decimals) per 1k tokens. Provider A (4021) is 1000 / 4000.
-start leash-provider-b 4022 inference echo-mini 600 2500 100
-start leash-provider-c 4023 inference echo-pro 2000 8000 100
+# USDC atomic units (6 decimals) per 1k tokens. Provider A (4021) is 1000 / 4000
+# and serves HF_MODEL from .env (default meta-llama/Llama-3.1-8B-Instruct).
+# With HF_TOKEN set, B and C serve real models; without it, all use the stub.
+start leash-provider-b 4022 inference echo-mini 600 2500 100 Qwen/Qwen3-4B-Instruct-2507
+start leash-provider-c 4023 inference echo-pro 2000 8000 100 Qwen/Qwen3-235B-A22B-Instruct-2507
 # Compute: a flat $0.008 minimum per job. No agent in the tree allows compute.
-start leash-provider-d 4024 compute gpu-burst 4000 16000 8000
+start leash-provider-d 4024 compute gpu-burst 4000 16000 8000 stub
