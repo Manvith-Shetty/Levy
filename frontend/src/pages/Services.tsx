@@ -63,11 +63,10 @@ export function Services() {
   )
 }
 
-/** What agents buy most comes first. */
+/** In VITE_SERVICES order; categories it doesn't name go last. */
 function rank(category: string): number {
-  const order = ['Inference', 'Data', 'Compute', 'Ops']
-  const i = order.indexOf(category)
-  return i === -1 ? order.length : i
+  const i = config.services.findIndex((s) => s.toLowerCase() === category.toLowerCase())
+  return i === -1 ? config.services.length : i
 }
 
 function ServiceCard({ service }: { service: Service }) {

@@ -1,7 +1,8 @@
 import { useLeash } from '../../lib/store'
+import { config } from '../../lib/config'
 
 const SOURCE_LABEL = {
-  ens: 'ENS tree (Sepolia)',
+  ens: `ENS tree (${config.ensChainName})`,
   hcs: 'HCS topic (Hedera mirror node)',
   gateway: 'Gateway',
   payer: 'Shared wallet balance',

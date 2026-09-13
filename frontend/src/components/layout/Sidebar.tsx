@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { hashscanUrl } from '../../lib/config'
+import { config, hashscanUrl } from '../../lib/config'
 import { treeAsset } from '../../lib/live/adapter'
 import { useLeash } from '../../lib/store'
 import { cx, money } from '../../lib/utils'
@@ -111,8 +111,8 @@ function LiveFooter() {
     <>
       <div>
         <p className="text-[11.5px] text-faint">Network</p>
-        <SourceLine label="Hedera Testnet" ok={!live.errors.hcs} detail={live.errors.hcs} />
-        <SourceLine label="ENS · Sepolia" ok={!live.errors.ens} detail={live.errors.ens} />
+        <SourceLine label={config.hederaNetworkName} ok={!live.errors.hcs} detail={live.errors.hcs} />
+        <SourceLine label={`ENS · ${config.ensChainName}`} ok={!live.errors.ens} detail={live.errors.ens} />
       </div>
       <div>
         <p className="text-[11.5px] text-faint">Shared agent wallet</p>

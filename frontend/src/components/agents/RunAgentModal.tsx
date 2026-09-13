@@ -19,12 +19,8 @@ import { Label, MoneyInput, Select, Textarea } from '../common/Field'
 import { Modal, ModalFoot, ModalHead } from '../common/Modal'
 import { PolicyChecklist } from '../policy/PolicyChecklist'
 
-/** A sensible first task per service, replaced once the owner types their own. */
-const DEFAULT_TASK: Record<string, string> = {
-  inference: "Explain Hedera's hashgraph consensus in three sentences.",
-  compute: 'Run a Redis cache for 10 minutes.',
-}
-const defaultTask = (service: string) => DEFAULT_TASK[service] ?? DEFAULT_TASK.inference
+/** A first task per service (VITE_DEFAULT_TASK_*), replaced once the owner types their own. */
+const defaultTask = (service: string) => config.defaultTasks[service] ?? config.defaultTasks.inference
 
 type Of<K extends RunStep['step']> = Extract<RunStep, { step: K }>
 
@@ -141,7 +137,7 @@ export function RunAgentModal({
   const ui = useUI()
 
   const choices = useMemo(() => agents.filter((a) => a.parentId), [agents])
-  const fallback = choices.find((a) => a.id === 'sub.agent.root')?.id ?? choices[0]?.id ?? ''
+  const fallback = choices.find((a) => a.id === config.defaultAgent)?.id ?? choices[0]?.id ?? ''
   const categories = useMemo(() => {
     const kinds = new Set(services.map((s) => s.listing?.kind).filter((k): k is string => Boolean(k)))
     kinds.add('inference')

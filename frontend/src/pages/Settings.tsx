@@ -115,7 +115,7 @@ function LiveSettings() {
   const [connecting, setConnecting] = useState(false)
   const payer = live.snapshot?.payer
   const sources: Array<{ key: keyof typeof live.errors; label: string; detail: string }> = [
-    { key: 'ens', label: 'ENS tree', detail: `Sepolia RPC ${new URL(config.sepoliaRpcUrl).host}` },
+    { key: 'ens', label: 'ENS tree', detail: `${config.ensChainName} RPC ${new URL(config.sepoliaRpcUrl).host}` },
     { key: 'hcs', label: 'HCS receipts and refusals', detail: `Mirror node ${new URL(config.mirrorUrl).host}` },
     { key: 'gateway', label: 'Gateway', detail: 'Manifest and in-memory records via /api — optional' },
     { key: 'payer', label: 'Shared wallet balance', detail: 'Mirror node account lookup' },
@@ -138,7 +138,7 @@ function LiveSettings() {
         </Card>
 
         <Card>
-          <CardHead title="Signing wallet" hint="Revoking, restoring and creating agents are Sepolia transactions signed in your browser wallet. Reading needs no wallet." />
+          <CardHead title="Signing wallet" hint={`Revoking, restoring and creating agents are ${config.ensChainName} transactions signed in your browser wallet. Reading needs no wallet.`} />
           <div className="mt-4 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-line bg-sunken p-4">
             <p className="font-mono text-[13px] text-ink">
               {live.account ?? (live.hasWallet ? 'Not connected' : 'No browser wallet found')}
@@ -177,8 +177,8 @@ function LiveSettings() {
         <Card>
           <CardHead title="Network" />
           <dl className="mt-3 divide-y divide-hairline">
-            <Fact label="Payments and audit trail" value="Hedera Testnet" />
-            <Fact label="Mandate tree" value="Ethereum Sepolia (ENSv2)" />
+            <Fact label="Payments and audit trail" value={config.hederaNetworkName} />
+            <Fact label="Mandate tree" value={`Ethereum ${config.ensChainName} (ENSv2)`} />
             <Fact label="Top registry" value={`${config.topRegistry.slice(0, 6)}…${config.topRegistry.slice(-4)}`} href={etherscanUrl('address', config.topRegistry)} />
             <Fact label="HCS topic" value={live.snapshot?.topicId ?? '—'} href={live.snapshot?.topicId ? hashscanUrl('topic', live.snapshot.topicId) : undefined} />
           </dl>

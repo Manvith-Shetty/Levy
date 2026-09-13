@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useToast } from '../../app/toast'
-import { etherscanUrl } from '../../lib/config'
+import { config, etherscanUrl } from '../../lib/config'
 import { explain } from '../../lib/live/wallet'
 import { useLeash } from '../../lib/store'
 import { cx } from '../../lib/utils'
@@ -85,7 +85,7 @@ export function Topbar({
                   live.errors.ens || live.errors.hcs ? 'bg-warn' : 'animate-pulse-dot bg-authority',
                 )}
               />
-              Hedera Testnet · Sepolia
+              {config.hederaNetworkName} · {config.ensChainName}
             </div>
             <WalletButton />
           </>
@@ -130,7 +130,7 @@ function WalletButton() {
         href={etherscanUrl('address', live.account)}
         target="_blank"
         rel="noreferrer"
-        title="Signs tree changes on Sepolia"
+        title={`Signs tree changes on ${config.ensChainName}`}
         className="wash press hidden h-8 items-center gap-2 rounded-md border border-line bg-raised px-2.5 text-[12px] text-ink-dim shadow-[var(--shadow-raised)] md:inline-flex"
       >
         <span className="font-mono text-[11.5px]">
@@ -150,7 +150,7 @@ function WalletButton() {
           push({
             tone: 'info',
             title: 'No browser wallet found',
-            body: 'Install MetaMask to revoke, renew or create agents on Sepolia. Reading the tree needs no wallet.',
+            body: `Install MetaMask to revoke, renew or create agents on ${config.ensChainName}. Reading the tree needs no wallet.`,
           })
           return
         }

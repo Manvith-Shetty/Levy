@@ -10,15 +10,27 @@
 //
 // Finds the agent's resolver by walking the registries from the top one,
 // simulates the write first, then sends it and waits for the receipt.
-// SEPOLIA_RPC_URL and ENS_TOP_REGISTRY override the defaults.
+//
+// Reads the same frontend .env as the dashboard (VITE_SEPOLIA_RPC_URL,
+// VITE_ENS_TOP_REGISTRY, VITE_ENS_CHAIN_ID, VITE_DEPLOYER_ADDRESS), so one file
+// points both at a deployment. SEPOLIA_RPC_URL / ENS_TOP_REGISTRY in the shell
+// still win.
 
-import { createPublicClient, createWalletClient, http, namehash, parseAbi, getAddress } from 'viem'
+import { createPublicClient, createWalletClient, defineChain, http, namehash, parseAbi, getAddress } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { sepolia } from 'viem/chains'
+import { mainnet, sepolia } from 'viem/chains'
+
+try {
+  process.loadEnvFile(new URL('../.env', import.meta.url))
+} catch {
+  // no .env: defaults below
+}
+const env = (key, fallback) => (process.env[key] || '').trim() || fallback
 
 const KEYS = ['budget', 'maxPerCall', 'ratePerMinute', 'allowedServices', 'allowedAssets']
 
-const DEPLOYER = '0x06de353ddb9c102cda81edc8a535b88dfd1f7c08'
+/** The account that owns the tree's resolvers; a dry run simulates as it. */
+const DEPLOYER = env('VITE_DEPLOYER_ADDRESS', '0x06de353ddb9c102cda81edc8a535b88dfd1f7c08')
 const dryRun = process.argv.includes('--dry-run')
 const [name, key, value] = process.argv.slice(2).filter((a) => a !== '--dry-run')
 if (!name || !key || value === undefined) {
@@ -35,8 +47,20 @@ if (!pk && !dryRun) {
   process.exit(1)
 }
 
-const rpc = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
-const top = getAddress((process.env.ENS_TOP_REGISTRY || '0x51d32dfa5baf7e3e1d718fdd37d0c346c5ba7838').toLowerCase())
+const rpc = env('SEPOLIA_RPC_URL', env('VITE_SEPOLIA_RPC_URL', 'https://ethereum-sepolia-rpc.publicnode.com'))
+const top = getAddress(env('ENS_TOP_REGISTRY', env('VITE_ENS_TOP_REGISTRY', '0x51d32dfa5baf7e3e1d718fdd37d0c346c5ba7838')).toLowerCase())
+const chainId = Number(env('VITE_ENS_CHAIN_ID', String(sepolia.id)))
+const chain =
+  chainId === sepolia.id
+    ? sepolia
+    : chainId === mainnet.id
+      ? mainnet
+      : defineChain({
+          id: chainId,
+          name: env('VITE_ENS_CHAIN_NAME', `chain ${chainId}`),
+          nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+          rpcUrls: { default: { http: [rpc] } },
+        })
 const registryAbi = parseAbi([
   'function getSubregistry(string label) view returns (address)',
   'function getResolver(string label) view returns (address)',
@@ -46,7 +70,7 @@ const resolverAbi = parseAbi([
   'function text(bytes32 node, string key) view returns (string)',
 ])
 
-const client = createPublicClient({ chain: sepolia, transport: http(rpc) })
+const client = createPublicClient({ chain, transport: http(rpc) })
 const account = dryRun ? { address: getAddress(DEPLOYER) } : privateKeyToAccount(pk.startsWith('0x') ? pk : `0x${pk}`)
 
 // Walk down: the top registry holds the last label; each subregistry the next.
@@ -74,9 +98,9 @@ if (dryRun) {
   console.log('dry run: the deployer can make this change. Run again with DEPLOYER_KEY to send it.')
   process.exit(0)
 }
-const wallet = createWalletClient({ account, chain: sepolia, transport: http(rpc) })
+const wallet = createWalletClient({ account, chain, transport: http(rpc) })
 const hash = await wallet.writeContract({ ...request, account })
 console.log(`sent ${hash}, waiting…`)
 const receipt = await client.waitForTransactionReceipt({ hash })
 if (receipt.status !== 'success') throw new Error(`reverted: ${hash}`)
-console.log(`done: https://sepolia.etherscan.io/tx/${hash}`)
+console.log(`done: ${env('VITE_ETH_EXPLORER_URL', 'https://sepolia.etherscan.io').replace(/\/$/, '')}/tx/${hash}`)

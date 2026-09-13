@@ -24,15 +24,12 @@ import { fromAtomic, type AssetInfo } from '../lib/live/runner'
 import { useLeash } from '../lib/store'
 import { cx, money, timeAgo } from '../lib/utils'
 
-const POLL_MS = 1_500
-const USDC: AssetInfo = { id: '', symbol: 'USDC', decimals: 6 }
+const POLL_MS = config.autopilotPollMs
+/** The tree's asset, until the ops provider says what it's paid in. */
+const TREE_ASSET: AssetInfo = { id: config.assetTokenId, symbol: config.assetSymbol, decimals: config.assetDecimals }
 
-/** What each service of the demo stack is, for people rather than Docker. */
-const ROLE: Record<string, string> = {
-  cache: 'Redis cache',
-  api: 'Python API',
-  web: 'Web front end',
-}
+/** What each service of the stack is, for people rather than Docker (VITE_STACK_SERVICE_LABELS). */
+const ROLE = config.serviceLabels
 
 type LaneState = 'waiting' | 'working' | 'done' | 'blocked' | 'failed' | 'skipped'
 
@@ -99,7 +96,7 @@ export function Autopilot() {
   }
 
   const incident = state?.current ?? state?.history[0] ?? null
-  const asset = state?.provider?.asset ?? USDC
+  const asset = state?.provider?.asset ?? TREE_ASSET
 
   return (
     <>
@@ -201,6 +198,16 @@ function AutopilotSwitch({
 
 // ─── The stack ───────────────────────────────────────────────────────────
 
+/** VITE_SHOP_URL, else the origin the ops provider probes. */
+function shopLink(probeUrl: string): string {
+  if (config.shopUrl) return config.shopUrl
+  try {
+    return new URL(probeUrl).origin
+  } catch {
+    return probeUrl
+  }
+}
+
 function clock(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
@@ -249,7 +256,7 @@ function StackCard({
     const recent = last?.status === 'resolved' && last.mttr_ms != null && now - new Date(last.closed_at ?? 0).getTime() < 5 * 60_000
     headline = recent ? `Fixed in ${seconds(last.mttr_ms!)}` : 'All healthy'
     sub = recent
-      ? `No person involved. ${last.actions.map(label).join(', ')} for ${money(fromAtomic(last.spent, last.asset ?? USDC))}.`
+      ? `No person involved. ${last.actions.map(label).join(', ')} for ${money(fromAtomic(last.spent, last.asset ?? TREE_ASSET))}.`
       : `Checked every 2 seconds. ${health.probe.url.replace(/^https?:\/\//, '')} answered ${health.probe.status} in ${health.probe.ms} ms.`
   } else {
     tone = current ? 'working' : 'down'
@@ -303,9 +310,9 @@ function StackCard({
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-hairline px-5 py-3.5">
         <p className="text-[12.5px] text-muted">
-          <span className="font-mono text-ink-dim">{health.project}</span> on local Docker ·{' '}
+          <span className="font-mono text-ink-dim">{health.project}</span> on Docker ·{' '}
           <a
-            href="http://localhost:8088"
+            href={shopLink(health.probe.url)}
             target="_blank"
             rel="noreferrer"
             className="underline-offset-4 hover:text-ink hover:underline"
@@ -428,12 +435,12 @@ interface Grant {
 function usePermissions(state: AutopilotState, refreshKey: string): Grant | null {
   const [grant, setGrant] = useState<Grant | null>(null)
   const { diagnose, fix } = state.agents
-  const perAction = state.provider?.offer?.per_action ?? 500
+  const perAction = state.provider?.offer?.per_action ?? config.diagnosisEstimate
   useEffect(() => {
     let cancelled = false
     const check = (agent: string, service: string, amount: number) =>
       authorize({ agent, amount, service }).catch(() => null)
-    Promise.all([check(diagnose, 'inference', 1_000), check(diagnose, 'ops', perAction), check(fix, 'ops', perAction)]).then(
+    Promise.all([check(diagnose, 'inference', config.diagnosisEstimate), check(diagnose, 'ops', perAction), check(fix, 'ops', perAction)]).then(
       ([diagnoseInference, diagnoseOps, fixOps]) => !cancelled && setGrant({ diagnoseInference, diagnoseOps, fixOps }),
     )
     return () => {
@@ -471,7 +478,7 @@ function Permissions({ state, incident }: { state: AutopilotState; incident: Inc
           <p>
             Its policy, or a parent's, doesn't list <span className="font-mono">ops</span> in{' '}
             <span className="font-mono">allowedServices</span>, so every repair it tries is refused and nothing is paid.
-            The owner grants it with one record per node (Sepolia, signed by the tree's deployer):
+            The owner grants it with one record per node ({config.ensChainName}, signed by the tree's deployer):
           </p>
           <pre className="mt-2 overflow-x-auto rounded-md border border-hairline bg-sunken px-3 py-2 font-mono text-[11.5px] leading-5 text-ink-dim">
             {(missing.length ? missing : chain)
@@ -491,7 +498,7 @@ function Permissions({ state, incident }: { state: AutopilotState; incident: Inc
 /** A policy answer as one line. `mustNot` marks what the agent shouldn't be able to buy. */
 function decisionLine(what: string, decision: PolicyDecision | null | undefined, mustNot = false): { text: string; ok?: boolean } {
   if (decision === undefined) return { text: `${what}: checking…` }
-  if (decision === null) return { text: `${what}: couldn't ask the policy engine (is the gateway on 4021 up?)` }
+  if (decision === null) return { text: `${what}: couldn't ask the policy engine (is the gateway up?)` }
   if (mustNot)
     return decision.approved
       ? { text: `${what}: allowed, so it could act on its own diagnosis`, ok: false }
@@ -902,7 +909,7 @@ function describe(s: IncidentStep, fmt: (a?: number, asset?: AssetInfo) => strin
     case 'payment_required':
       return 'The provider answered 402 with its price'
     case 'paying':
-      return 'Signing the USDC transfer'
+      return `Signing the ${config.assetSymbol} transfer`
     case 'settled':
       return `Settled ${s.transaction}`
     case 'result':

@@ -94,7 +94,7 @@ export function Overview() {
               {!live.active
                 ? 'No agents yet. Create one to start delegating authority.'
                 : live.errors.ens
-                  ? `Couldn't read the agent tree from Sepolia: ${live.errors.ens}`
+                  ? `Couldn't read the agent tree from ${config.ensChainName}: ${live.errors.ens}`
                   : 'No agents found under the configured top registry. Check VITE_ENS_TOP_REGISTRY and VITE_ENS_FROM_BLOCK.'}
             </p>
           )}

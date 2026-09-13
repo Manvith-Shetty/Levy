@@ -304,7 +304,7 @@ export function adapt(snapshot: LiveSnapshot): LiveModel {
     return {
       id: node.name,
       name: node.name,
-      description: 'Non-transferable ENSv2 subname on Sepolia',
+      description: `Non-transferable ENSv2 subname on ${config.ensChainName}`,
       parentId: node.parent,
       children: nodes.filter((n) => n.parent === node.name).map((n) => n.name),
       authority: units(budget),

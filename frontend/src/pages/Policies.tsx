@@ -8,7 +8,7 @@ import { Card } from '../components/common/Card'
 import { Pill } from '../components/common/Badge'
 import { IconPlus } from '../components/layout/icons'
 import { useToast } from '../app/toast'
-import { etherscanUrl } from '../lib/config'
+import { config, etherscanUrl } from '../lib/config'
 import { PolicySimulator } from '../components/policy/PolicySimulator'
 
 export function Policies() {
@@ -20,7 +20,7 @@ export function Policies() {
       <>
         <PageHeader
           title="Policies"
-          subtitle="Each agent's rules live in its ENS text records, read live from Sepolia. Leash's policy engine checks every one, up the whole chain, before any payment."
+          subtitle={`Each agent's rules live in its ENS text records, read live from ${config.ensChainName}. Leash's policy engine checks every one, up the whole chain, before any payment.`}
         />
         <PolicySimulator />
         <h2 className="mt-8 mb-3 text-[15px] font-semibold text-ink">Agent policies</h2>

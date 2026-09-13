@@ -3,6 +3,7 @@ import { useToast } from '../app/toast'
 import { explain } from '../lib/live/wallet'
 import { useLeash } from '../lib/store'
 import type { Agent } from '../lib/types'
+import { config } from '../lib/config'
 
 /** Renews a revoked or lapsed live agent from the connected wallet. */
 export function useRestore() {
@@ -18,7 +19,7 @@ export function useRestore() {
       push({
         tone: 'success',
         title: 'Authority restored',
-        body: `${agent.name} was renewed on Sepolia and can authorize payments again.`,
+        body: `${agent.name} was renewed on ${config.ensChainName} and can authorize payments again.`,
       })
     } catch (error) {
       push({ tone: 'blocked', title: 'Restore not sent', body: explain(error, agent.account) })

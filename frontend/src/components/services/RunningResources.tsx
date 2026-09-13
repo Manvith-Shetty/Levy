@@ -7,7 +7,7 @@ import { cx } from '../../lib/utils'
 import { Button } from '../common/Button'
 import { Card, CardHead } from '../common/Card'
 
-const POLL_MS = 5_000
+const POLL_MS = config.resourcesPollMs
 
 function timeLeft(expiresAt: string, now: number): string {
   const ms = new Date(expiresAt).getTime() - now

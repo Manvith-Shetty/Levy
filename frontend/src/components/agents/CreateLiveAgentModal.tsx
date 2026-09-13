@@ -14,7 +14,7 @@ const STEPS = ['Identity', 'Authority', 'Permissions', 'Expiration'] as const
 type Step = 0 | 1 | 2 | 3
 
 /** Services the gateway can sell today; the record is free text on-chain. */
-const SERVICES = ['inference', 'compute', 'ops', 'storage']
+const SERVICES = config.services
 
 /**
  * Mints a real child mandate on ENSv2 Sepolia. The MandateRegistrar enforces
@@ -129,7 +129,7 @@ export function CreateLiveAgentModal({
           setProgress(next)
         },
       )
-      push({ tone: 'success', title: 'Agent created', body: `${fullName} was minted on Sepolia.` })
+      push({ tone: 'success', title: 'Agent created', body: `${fullName} was minted on ${config.ensChainName}.` })
       onClose()
       navigate(`/agents/${fullName}`)
     } catch (err) {
@@ -149,7 +149,7 @@ export function CreateLiveAgentModal({
   const treeOwner = parent?.account?.toLowerCase()
   const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`
   const signerNote = !live.hasWallet
-    ? 'Both signatures happen on Sepolia, so this needs an Ethereum wallet such as MetaMask, not a Hedera account.'
+    ? `Both signatures happen on ${config.ensChainName}, so this needs an Ethereum wallet such as MetaMask, not a Hedera account.`
     : live.account && treeOwner && live.account.toLowerCase() !== treeOwner
       ? `Only ${short(treeOwner)}, which owns this tree, can write the records. Switch to that account, or this is refused before anything is signed.`
       : null

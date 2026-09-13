@@ -20,7 +20,15 @@ npm run dev          # http://localhost:5173
 ```
 
 No `.env` is needed: every setting defaults to the public deployment. To point
-at a redeploy, copy `.env.example` to `.env` and override what changed.
+at a redeploy, copy `.env.example` to `.env`, override what changed, and
+rebuild — `VITE_*` values are baked in at build time. Nothing deployment-specific
+is written into `src/`: contract addresses, chain and explorer URLs, RPCs and
+their fallbacks, Hedera ids, the asset, the default agent, the service list,
+default tasks, Autopilot's shop link and labels, and refresh intervals all come
+from `src/lib/config.ts`, which reads `.env.example`'s keys. Network names in
+the interface follow `VITE_ENS_CHAIN_NAME` and `VITE_HEDERA_NETWORK`.
+`scripts/set-record.mjs` reads the same `.env`, so one file points both the
+dashboard and the script at a deployment.
 
 ## Where live data comes from
 

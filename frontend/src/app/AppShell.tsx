@@ -65,7 +65,7 @@ export function AppShell() {
             <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-delegated/35 bg-delegated/[0.07] px-4 py-3">
               <p className="copy text-[13px] text-ink-dim">
                 <span className="font-medium text-delegated">Simulated data.</span> Agents, payments and receipts here
-                are generated for the demo. Nothing touches Sepolia or Hedera.
+                are generated for the demo. Nothing touches {config.ensChainName} or Hedera.
               </p>
               <Button size="sm" onClick={() => setDemoMode(false)}>
                 Show the live system

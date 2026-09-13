@@ -3,6 +3,7 @@ import type { PaymentDecision } from '../../lib/types'
 import { cx, money, shortHash } from '../../lib/utils'
 import { Modal, ModalFoot } from '../common/Modal'
 import { Button } from '../common/Button'
+import { config } from '../../lib/config'
 
 /**
  * The authorization read-out (spec §23). It answers "why?": the request, the
@@ -78,7 +79,7 @@ export function PaymentResult({
       </div>
 
       <ModalFoot>
-        <span className="text-[12px] text-faint">Hedera Testnet</span>
+        <span className="text-[12px] text-faint">{config.hederaNetworkName}</span>
         <Button variant="secondary" onClick={onClose}>
           Close
         </Button>

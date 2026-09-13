@@ -1,6 +1,6 @@
 /**
  * Writes to the mandate tree from the user's own wallet (EIP-1193, e.g.
- * MetaMask) on Sepolia. The dashboard never holds a key.
+ * MetaMask) on the tree's chain. The dashboard never holds a key.
  *
  * Every write is simulated first, so a missing role or a registrar rule
  * (child budget above the parent's, expiry past the parent's) comes back as
@@ -20,7 +20,7 @@ import {
   type EIP1193Provider,
   type Hash,
 } from 'viem'
-import { sepolia } from 'viem/chains'
+import { ensChain } from './chain'
 import { config } from '../config'
 import { client, labelhashOf, registrarAbi, registryAbi, resolverAbi } from './ens'
 
@@ -37,28 +37,28 @@ export function hasInjectedWallet(): boolean {
 function walletClient() {
   if (!window.ethereum) {
     throw new Error(
-      'No browser wallet found. The agent tree lives on Sepolia, so this needs an Ethereum wallet such as MetaMask — not a Hedera account.',
+      `No browser wallet found. The agent tree lives on ${config.ensChainName}, so this needs an Ethereum wallet such as MetaMask — not a Hedera account.`,
     )
   }
-  return createWalletClient({ chain: sepolia, transport: custom(window.ethereum) })
+  return createWalletClient({ chain: ensChain, transport: custom(window.ethereum) })
 }
 
-async function ensureSepolia(wallet: ReturnType<typeof walletClient>) {
+async function ensureChain(wallet: ReturnType<typeof walletClient>) {
   const chainId = await wallet.getChainId()
-  if (chainId === sepolia.id) return
+  if (chainId === ensChain.id) return
   try {
-    await wallet.switchChain({ id: sepolia.id })
+    await wallet.switchChain({ id: ensChain.id })
   } catch {
-    await wallet.addChain({ chain: sepolia })
-    await wallet.switchChain({ id: sepolia.id })
+    await wallet.addChain({ chain: ensChain })
+    await wallet.switchChain({ id: ensChain.id })
   }
 }
 
-/** Asks the wallet for an account and moves it to Sepolia. */
+/** Asks the wallet for an account and moves it to the tree's chain. */
 export async function connect(): Promise<Address> {
   const wallet = walletClient()
   const [account] = await wallet.requestAddresses()
-  await ensureSepolia(wallet)
+  await ensureChain(wallet)
   return getAddress(account)
 }
 
@@ -103,7 +103,7 @@ async function send(
   request: Parameters<typeof client.simulateContract>[0],
 ): Promise<Hash> {
   const wallet = walletClient()
-  await ensureSepolia(wallet)
+  await ensureChain(wallet)
   const [account] = await wallet.getAddresses()
   if (!account) throw new Error('Connect a wallet first.')
   const { request: simulated } = await client.simulateContract({ ...request, account } as never)

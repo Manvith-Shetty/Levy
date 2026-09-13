@@ -4,6 +4,7 @@ import type { Agent } from '../../lib/types'
 import { money } from '../../lib/utils'
 import { Modal, ModalFoot, ModalHead } from '../common/Modal'
 import { Button } from '../common/Button'
+import { config } from '../../lib/config'
 
 export function RevokeAgentModal({
   agent,
@@ -74,7 +75,7 @@ export function RevokeAgentModal({
         {live.active ? (
           <p className="copy mt-4 text-[12.5px] text-muted">
             Sends one <span className="font-mono text-[12px] text-ink-dim">unregister</span>{' '}
-            transaction on Sepolia from your connected wallet. The gateway's next check walks up
+            transaction on {config.ensChainName} from your connected wallet. The gateway's next check walks up
             through {agent.name}, finds it gone, and refuses — no transaction per child. You can
             restore it afterwards by renewing it.
           </p>

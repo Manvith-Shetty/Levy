@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom'
 import { useLeash } from '../../lib/store'
 import { statsFor } from '../../lib/selectors'
 import type { ActivityEvent } from '../../lib/types'
-import { hashscanUrl } from '../../lib/config'
+import { config, hashscanUrl } from '../../lib/config'
 import { amountIn, cx, formatDateTime, money, shortHash } from '../../lib/utils'
 import { Drawer, Row } from '../common/Drawer'
 import { LimitBar } from '../common/Meter'
@@ -29,11 +29,11 @@ export function TransactionDrawer({
 
   const explorer =
     event.explorerUrl ??
-    `https://hashscan.io/${network === 'hedera-mainnet' ? 'mainnet' : 'testnet'}/transaction/${event.txId ?? ''}`
+    `${config.hashscanBaseUrl}/${network === 'hedera-mainnet' ? 'mainnet' : 'testnet'}/transaction/${event.txId ?? ''}`
   const eventNetwork = event.source ? event.network : network
   const networkLabel =
     eventNetwork === 'ethereum-sepolia'
-      ? 'Ethereum Sepolia'
+      ? `Ethereum ${config.ensChainName}`
       : eventNetwork === 'hedera-mainnet'
         ? 'Hedera Mainnet'
         : 'Hedera Testnet'

@@ -1,3 +1,4 @@
+import { config } from '../config'
 import type {
   PolicyDecision,
   Receipt,
@@ -15,7 +16,7 @@ import type {
 // Set VITE_GATEWAY_URL at build time to skip the proxy and call the gateway
 // directly instead — only once the gateway sends CORS headers for this
 // origin, which it doesn't yet.
-const BASE = import.meta.env.VITE_GATEWAY_URL || '/api'
+const BASE = config.gatewayUrl
 
 export class ApiError extends Error {
   status: number
@@ -82,14 +83,14 @@ export function revokeMandate(body: RevokeMandateRequest): Promise<{ revoked: st
   }).then(json<{ revoked: string }>)
 }
 
-/** `https://hashscan.io/<net>/transaction/<id>` for a settled transaction. */
+/** `<explorer>/<net>/transaction/<id>` for a settled transaction. */
 export function hashscanTx(network: string, transaction: string): string {
   const net = network.includes('mainnet') ? 'mainnet' : 'testnet'
-  return `https://hashscan.io/${net}/transaction/${transaction}`
+  return `${config.hashscanBaseUrl}/${net}/transaction/${transaction}`
 }
 
-/** `https://hashscan.io/<net>/topic/<id>` for the HCS receipts topic. */
+/** `<explorer>/<net>/topic/<id>` for the HCS receipts topic. */
 export function hashscanTopic(network: string, topic: string): string {
   const net = network.includes('mainnet') ? 'mainnet' : 'testnet'
-  return `https://hashscan.io/${net}/topic/${topic}`
+  return `${config.hashscanBaseUrl}/${net}/topic/${topic}`
 }

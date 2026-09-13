@@ -8,7 +8,7 @@ import { Card, CardHead } from '../common/Card'
 import { Label, MoneyInput, Select } from '../common/Field'
 import { PolicyChecklist } from './PolicyChecklist'
 
-const SERVICES = ['inference', 'compute', 'ops', 'data']
+const SERVICES = config.services
 
 /**
  * Asks the gateway's policy engine about a payment that never happens: the
@@ -22,7 +22,7 @@ export function PolicySimulator() {
   // Agents arrive after the first render; until one is picked, default to the deepest demo agent.
   const agent = choices.some((a) => a.id === picked)
     ? picked
-    : (choices.find((a) => a.id === 'sub.agent.root')?.id ?? choices[0]?.id ?? '')
+    : (choices.find((a) => a.id === config.defaultAgent)?.id ?? choices[0]?.id ?? '')
   const [service, setService] = useState('inference')
   const [amount, setAmount] = useState<number | ''>(0.000328)
   const [asset, setAsset] = useState(config.assetSymbol)
