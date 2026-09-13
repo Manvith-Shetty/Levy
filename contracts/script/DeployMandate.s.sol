@@ -153,7 +153,10 @@ contract DeployMandate {
             rootExpiry
         );
         IEnsResolver(r1).setText(rootNode, "budget", "100000");
-        IEnsResolver(r1).setText(rootNode, "allowedServices", "inference");
+        // Services: root and agent may buy inference, containers (compute) and
+        // stack repairs (ops) — agent.root is the autopilot's repair agent;
+        // sub stays inference-only, so the agent that diagnoses can't act.
+        IEnsResolver(r1).setText(rootNode, "allowedServices", "inference,compute,ops");
         IEnsResolver(r1).setText(rootNode, "ratePerMinute", "100000");
         IEnsResolver(r1).setText(rootNode, "maxPerCall", "100000");
 
@@ -163,7 +166,7 @@ contract DeployMandate {
         registrar.bindParent(l1, "root", rootNode);
         registrar.registerChild(l2, l1, "root", "agent", deployer, r2, 50_000, uint64(block.timestamp) + 60 days);
         IEnsResolver(r2).setText(agentNode, "budget", "50000");
-        IEnsResolver(r2).setText(agentNode, "allowedServices", "inference");
+        IEnsResolver(r2).setText(agentNode, "allowedServices", "inference,compute,ops");
         IEnsResolver(r2).setText(agentNode, "ratePerMinute", "50000");
         IEnsResolver(r2).setText(agentNode, "maxPerCall", "50000");
 
